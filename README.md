@@ -34,7 +34,7 @@ The script defaults to `ap-northeast-2`. Its AMI and key-pair name are declared 
 ## CloudShell usage
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
+git clone https://github.com/AR0NICA/kwu-aws-auto-infra.git
 cd aws-auto-infra
 chmod +x auto_infra.sh
 ADMIN_CIDR=<YOUR_PUBLIC_IP>/32 ./auto_infra.sh
