@@ -1,112 +1,78 @@
 # KWU AWS AUTO INFRA
 
-Terraform-managed AWS 3-Tier infrastructure for `ap-northeast-2`.
+Modular Bash automation for a highly available AWS 3-Tier sample environment in `ap-northeast-2`.
+
+## Architecture
 
 ```text
-Internet → Route 53 → ALB → Nginx (2 AZ) → Tomcat (2 AZ) → RDS MySQL
-Admin PC → Bastion → Nginx / Tomcat
-```
+Internet
+  │
+Route 53 → Application Load Balancer
+              │
+              ├─ Nginx 2A (public subnet) ─┐
+              └─ Nginx 2C (public subnet) ─┼─→ Tomcat 2A / 2C (private subnets)
+                                             │
+                                             └─→ RDS MySQL (private DB subnets)
 
-The stack uses one NAT Gateway and Single-AZ RDS to control cost. Nginx and Tomcat run across two Availability Zones. The ALB is the only public HTTP entry point; Tomcat and MySQL are private.
+Admin PC → Bastion (public subnet) → Nginx / Tomcat via SSH
+```
 
 ![KWU AWS AUTO INFRA 3-Tier architecture](assets/3-tier-Infra-arch.png)
 
+`auto_infra.sh` composes the shared infrastructure, IAM/Secrets Manager, and JSP board modules. It creates the VPC, Bastion, Nginx, Tomcat, private RDS MySQL, ALB, target group, and Route 53 alias record.
+
 ## Prerequisites
 
-- Terraform 1.10 or later and AWS CLI authenticated for the target account.
-- A public Route 53 hosted zone whose name exactly matches `domain_name`.
-- Existing EC2 key pair `kwuaws` in `ap-northeast-2`, unless overridden in `terraform.tfvars`.
-- The Ubuntu AMI configured in `variables.tf` must be available in `ap-northeast-2`.
-- Permission to create and configure the Terraform S3 backend bucket on the first run.
+- AWS CLI configured with credentials that can create and delete the listed AWS resources.
+- A public Route 53 hosted zone for the domain entered at runtime.
+- An EC2 key pair named `kwuaws` in `ap-northeast-2`.
+- The AMI configured in `lib/infrastructure.sh` must be available in the selected region.
+- Bash, `curl`, and `base64`.
 
-The Terraform S3 backend is fixed to:
-
-```text
-bucket: kwu-prd-vpc-terraform-state
-key:    kwu-prd-vpc/terraform.tfstate
-region: ap-northeast-2
-```
-
-The deployment principal needs normal AWS resource permissions plus S3 `CreateBucket`, `PutBucketVersioning`, `PutEncryptionConfiguration`, `PutPublicAccessBlock`, `PutBucketOwnershipControls`, `GetObject`, `PutObject`, `DeleteObject`, and `ListBucket` permissions. The bootstrap script creates the bucket with versioning, SSE-S3 encryption, all public-access blocks, and bucket-owner-enforced object ownership.
-
-## First migration from the Bash stack
-
-Do this before applying Terraform to the same domain.
-
-1. Resolve the legacy Route 53 deletion failure by reading and deleting the exact current alias record. The first command is a safe dry-run.
-
-   ```bash
-   bash scripts/cleanup_legacy_route53_alias.sh \
-     --hosted-zone-id <ROUTE53_HOSTED_ZONE_ID> \
-     --record-name ar0nica.xyz
-
-   bash scripts/cleanup_legacy_route53_alias.sh \
-     --hosted-zone-id <ROUTE53_HOSTED_ZONE_ID> \
-     --record-name ar0nica.xyz \
-     --apply
-   ```
-
-2. Delete the remaining legacy AWS resources before switching to Terraform. The legacy script is intentionally removed from the current branch, but it remains available in the pre-migration commit for this one-time cleanup:
-
-   ```bash
-   git show 655beb9:auto_infra_aio.sh > /tmp/auto_infra_aio.sh
-   bash /tmp/auto_infra_aio.sh
-   ```
-
-   Choose menu option `2` after the Route 53 alias has been removed. Do not import the Bash-created stack into this repository.
-3. Confirm that the old VPC, ALB, EC2 instances, RDS instance, and Route 53 A alias record are gone.
-
-The legacy cleanup tool accepts only an A alias whose target ends in `elb.amazonaws.com.`. It sends the exact `ResourceRecordSet` returned by Route 53 in the DELETE request, which avoids the previous error caused by reconstructing a mismatched ALB alias payload.
+The script defaults to `ap-northeast-2`. Its AMI and key-pair name are declared near the top of `lib/infrastructure.sh` if your environment differs.
 
 ## CloudShell usage
 
 ```bash
-git clone https://github.com/AR0NICA/kwu-aws-auto-infra.git
-cd kwu-aws-auto-infra
-cp terraform.tfvars.example terraform.tfvars
+git clone <YOUR_GITHUB_REPOSITORY_URL>
+cd aws-auto-infra
+chmod +x auto_infra.sh
+ADMIN_CIDR=<YOUR_PUBLIC_IP>/32 ./auto_infra.sh
 ```
 
-Set your domain and public IP in `terraform.tfvars`, then provide the requested RDS password only for the active shell:
+Use menu option `1` to create the environment, `2` to delete it, and `3` to test the ALB and Tomcat proxy endpoint.
+
+`ADMIN_CIDR` controls SSH access to Bastion. Do not leave it open to the internet in a real environment. For example:
 
 ```bash
-export TF_VAR_db_master_password='powerkwu'
-bash scripts/terraform.sh init -reconfigure
-bash scripts/terraform.sh fmt -check -recursive
-bash scripts/terraform.sh validate
-bash scripts/terraform.sh plan -out=tfplan
-bash scripts/terraform.sh apply tfplan
+ADMIN_CIDR=203.0.113.10/32 ./auto_infra.sh
 ```
 
-`TF_VAR_db_master_password` is deliberately not written to a tracked file. Terraform marks it sensitive in CLI output, but it is still stored in the remote Terraform state. Restrict access to the backend bucket accordingly.
+## After deployment
 
-`scripts/terraform.sh` runs the idempotent backend bootstrap before each Terraform command. This is necessary because Terraform initializes its backend before it can manage normal Terraform resources. If the global S3 bucket name is already owned by another AWS account, choose a different globally unique bucket name and update both `versions.tf` and `scripts/bootstrap_terraform_backend.sh` to the same value.
+The final **Deployment Summary** prints:
 
-## Outputs and access
+- Bastion public IP
+- ALB URL
+- Route 53 domain URL
+- Tomcat sample application URL at `http://<domain>/app/`
+- Private RDS endpoint
 
-```bash
-terraform output
-```
+Connect to the private instances through Bastion using the same EC2 key pair. Tomcat port `8080` is reachable only from the Nginx security groups; MySQL port `3306` is reachable only from Tomcat.
 
-Outputs include the Bastion public IP, ALB DNS name, website URL, Tomcat dashboard URL, and private RDS endpoint.
+## Security and data handling
 
-Connect to private instances through Bastion using the same EC2 key pair. The final app URL is:
+- RDS is private and uses an AWS-managed master password in Secrets Manager. The password is not printed or copied to EC2 user-data.
+- The Tomcat instance profile can read only the RDS-managed secret; credentials are not printed or placed in the repository.
+- The `/app/` JSP creates the `posts` table when needed and provides a JDBC-backed board with create, read, and delete operations.
+- To add database-backed application behavior, give the Tomcat instance profile least-privilege access to the specific RDS-managed secret and retrieve it at application runtime.
 
-```text
-http://<domain_name>/app/
-```
+## Cost and deletion
 
-The Tomcat page is an automatically deployed visual status dashboard. It confirms the `ALB → Nginx → Tomcat` route and displays the private DB endpoint; it does not expose credentials or run SQL queries.
+This deployment creates billable services, including a NAT Gateway, Application Load Balancer, EC2 instances, and RDS MySQL. Delete the environment with menu option `2` when it is no longer needed.
 
-## Destroy
-
-```bash
-export TF_VAR_db_master_password='powerkwu'
-bash scripts/terraform.sh plan -destroy -out=destroy.tfplan
-bash scripts/terraform.sh apply destroy.tfplan
-```
-
-Destroy deletes the Route 53 alias through Terraform state, then deletes the remaining infrastructure. RDS is configured with `skip_final_snapshot = true`; export any data you need before destruction. NAT Gateway, ALB, EC2, and RDS incur AWS charges while they exist.
+The deletion workflow removes the RDS instance with `--skip-final-snapshot`; back up any required data before deletion.
 
 ## License
 
-[MIT License](LICENSE)
+This project is licensed under the [MIT License](LICENSE).

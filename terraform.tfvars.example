@@ -1,6 +1,0 @@
-domain_name = "example.com"
-admin_cidr  = "203.0.113.10/32"
-
-# Optional overrides
-# key_name      = "kwuaws"
-# instance_type = "t3.micro"
