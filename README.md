@@ -44,7 +44,14 @@ Do this before applying Terraform to the same domain.
      --apply
    ```
 
-2. Delete the remaining legacy AWS resources before switching to Terraform. Do not import the Bash-created stack into this repository.
+2. Delete the remaining legacy AWS resources before switching to Terraform. The legacy script is intentionally removed from the current branch, but it remains available in the pre-migration commit for this one-time cleanup:
+
+   ```bash
+   git show 655beb9:auto_infra_aio.sh > /tmp/auto_infra_aio.sh
+   bash /tmp/auto_infra_aio.sh
+   ```
+
+   Choose menu option `2` after the Route 53 alias has been removed. Do not import the Bash-created stack into this repository.
 3. Confirm that the old VPC, ALB, EC2 instances, RDS instance, and Route 53 A alias record are gone.
 
 The legacy cleanup tool accepts only an A alias whose target ends in `elb.amazonaws.com.`. It sends the exact `ResourceRecordSet` returned by Route 53 in the DELETE request, which avoids the previous error caused by reconstructing a mismatched ALB alias payload.
