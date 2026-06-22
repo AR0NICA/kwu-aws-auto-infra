@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y openjdk-17-jdk tomcat9
+rm -f /var/lib/tomcat9/webapps/ROOT/index.html
+
+cat > /var/lib/tomcat9/webapps/ROOT/index.jsp <<'JSP'
+<%@ page contentType="text/html; charset=UTF-8" %>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KWU Application Tier</title>
+  <style>
+    :root { color-scheme:dark; --bg:#050a16; --panel:#0e1930d9; --line:#2d4772; --accent:#62d6ff; --ok:#79f2bd; --text:#eff8ff; --muted:#9db2ca; }
+    * { box-sizing:border-box; } body { margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter,ui-sans-serif,system-ui,sans-serif; color:var(--text); background:radial-gradient(circle at 10% 8%,#10466f 0,transparent 34%),radial-gradient(circle at 90% 85%,#3d1f67 0,transparent 36%),var(--bg); }
+    .panel { width:min(760px,92vw); padding:48px; border:1px solid var(--line); border-radius:24px; background:var(--panel); box-shadow:0 24px 90px #0009; backdrop-filter:blur(16px); } .status { display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border:1px solid #2b795d; border-radius:999px; color:var(--ok); font-size:.75rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; } .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 18px var(--ok); }
+    h1 { margin:16px 0 10px; font-size:clamp(2rem,6vw,3.5rem); letter-spacing:-.06em; } p { color:var(--muted); line-height:1.7; } .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:32px; } .item { min-height:98px; padding:16px; border:1px solid var(--line); border-radius:14px; background:#081326; } .label { display:block; color:var(--muted); font-size:.72rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; } .value { display:block; margin-top:9px; overflow-wrap:anywhere; color:var(--accent); font-family:ui-monospace,SFMono-Regular,monospace; font-size:.92rem; font-weight:700; } @media(max-width:560px){.panel{padding:32px 24px}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main class="panel"><div class="status"><span class="dot"></span>Application tier operational</div><h1>Tomcat is working.</h1><p>Your request reached the private WAS tier through the Application Load Balancer and Nginx reverse proxy.</p><section class="grid"><div class="item"><span class="label">WAS node</span><span class="value">KWU-PRD-VPC-TOMCAT-PRI-${zone}</span></div><div class="item"><span class="label">Request path</span><span class="value"><%= request.getRequestURI() %></span></div><div class="item"><span class="label">Proxy route</span><span class="value">ALB → Nginx → Tomcat</span></div><div class="item"><span class="label">Private database endpoint</span><span class="value">${database_endpoint}</span></div></section></main></body>
+</html>
+JSP
+
+chown tomcat:tomcat /var/lib/tomcat9/webapps/ROOT/index.jsp
+systemctl enable --now tomcat9
