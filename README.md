@@ -9,13 +9,15 @@ Admin PC → Bastion → Nginx / Tomcat
 
 The stack uses one NAT Gateway and Single-AZ RDS to control cost. Nginx and Tomcat run across two Availability Zones. The ALB is the only public HTTP entry point; Tomcat and MySQL are private.
 
+![KWU AWS AUTO INFRA 3-Tier architecture](assets/3-tier-Infra-arch.png)
+
 ## Prerequisites
 
 - Terraform 1.10 or later and AWS CLI authenticated for the target account.
 - A public Route 53 hosted zone whose name exactly matches `domain_name`.
 - Existing EC2 key pair `kwuaws` in `ap-northeast-2`, unless overridden in `terraform.tfvars`.
 - The Ubuntu AMI configured in `variables.tf` must be available in `ap-northeast-2`.
-- S3 bucket `kwu-prd-vpc-terraform-state` in `ap-northeast-2`, with versioning, default encryption, and public access block enabled.
+- Permission to create and configure the Terraform S3 backend bucket on the first run.
 
 The Terraform S3 backend is fixed to:
 
@@ -25,7 +27,7 @@ key:    kwu-prd-vpc/terraform.tfstate
 region: ap-northeast-2
 ```
 
-The deployment principal needs normal AWS resource permissions plus S3 `GetObject`, `PutObject`, `DeleteObject`, and `ListBucket` permissions for the state object and its `.tflock` lock file.
+The deployment principal needs normal AWS resource permissions plus S3 `CreateBucket`, `PutBucketVersioning`, `PutEncryptionConfiguration`, `PutPublicAccessBlock`, `PutBucketOwnershipControls`, `GetObject`, `PutObject`, `DeleteObject`, and `ListBucket` permissions. The bootstrap script creates the bucket with versioning, SSE-S3 encryption, all public-access blocks, and bucket-owner-enforced object ownership.
 
 ## First migration from the Bash stack
 
@@ -68,14 +70,16 @@ Set your domain and public IP in `terraform.tfvars`, then provide the requested 
 
 ```bash
 export TF_VAR_db_master_password='powerkwu'
-terraform init
-terraform fmt -check -recursive
-terraform validate
-terraform plan -out=tfplan
-terraform apply tfplan
+bash scripts/terraform.sh init -reconfigure
+bash scripts/terraform.sh fmt -check -recursive
+bash scripts/terraform.sh validate
+bash scripts/terraform.sh plan -out=tfplan
+bash scripts/terraform.sh apply tfplan
 ```
 
 `TF_VAR_db_master_password` is deliberately not written to a tracked file. Terraform marks it sensitive in CLI output, but it is still stored in the remote Terraform state. Restrict access to the backend bucket accordingly.
+
+`scripts/terraform.sh` runs the idempotent backend bootstrap before each Terraform command. This is necessary because Terraform initializes its backend before it can manage normal Terraform resources. If the global S3 bucket name is already owned by another AWS account, choose a different globally unique bucket name and update both `versions.tf` and `scripts/bootstrap_terraform_backend.sh` to the same value.
 
 ## Outputs and access
 
@@ -97,8 +101,8 @@ The Tomcat page is an automatically deployed visual status dashboard. It confirm
 
 ```bash
 export TF_VAR_db_master_password='powerkwu'
-terraform plan -destroy -out=destroy.tfplan
-terraform apply destroy.tfplan
+bash scripts/terraform.sh plan -destroy -out=destroy.tfplan
+bash scripts/terraform.sh apply destroy.tfplan
 ```
 
 Destroy deletes the Route 53 alias through Terraform state, then deletes the remaining infrastructure. RDS is configured with `skip_final_snapshot = true`; export any data you need before destruction. NAT Gateway, ALB, EC2, and RDS incur AWS charges while they exist.
