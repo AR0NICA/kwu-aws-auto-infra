@@ -8,7 +8,7 @@ Internet → Route 53 → ALB (HTTPS) → Nginx (2A / 2C) → Tomcat (2A / 2C) �
 Admin network → Bastion ───────────────────┘
 ```
 
-![3-tier infrastructure architecture](assets/3-tier-Infra-arch.png)
+![3-tier infrastructure architecture](assets/3-tier-arch.png)
 
 The project uses two Availability Zones for Nginx and Tomcat, one NAT Gateway and a single-AZ RDS instance to keep a lab deployment affordable. The ALB is the only public application endpoint. Nginx, Tomcat, and RDS are not directly reachable from the internet.
 
