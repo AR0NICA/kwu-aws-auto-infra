@@ -24,7 +24,7 @@ The project uses two Availability Zones for Nginx and Tomcat, one NAT Gateway an
 ## Prerequisites
 
 - AWS CloudShell with AWS CLI credentials for `ap-northeast-2`.
-- A public Route 53 hosted zone already delegated to the domain you enter. The domain must match that hosted zone exactly.
+- A public Route 53 hosted zone already delegated to the apex domain you enter, such as `example.com`. If `www.example.com` is entered, the TUI automatically uses `example.com`.
 - An existing EC2 key pair in `ap-northeast-2`.
 - IAM permission to create the listed VPC, EC2, IAM, ELBv2, RDS, ACM, Route 53, Secrets Manager, and S3 resources. The first run must also be able to configure the generated S3 state bucket.
 
