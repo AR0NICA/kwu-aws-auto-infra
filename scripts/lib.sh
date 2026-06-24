@@ -229,11 +229,6 @@ write_variables() {
 EOF
 }
 
-show_outputs() {
-  "$TERRAFORM_BIN" -chdir="$TF_DIR" output || return 1
-  say OK 'Deployment completed.'
-}
-
 terraform_state_exists() {
   aws s3api head-object \
     --bucket "$BACKEND_BUCKET" \
@@ -261,8 +256,7 @@ create_infrastructure() {
   write_variables || return 1
   say INFO 'Creating infrastructure. RDS and ACM validation can take several minutes.'
   "$TERRAFORM_BIN" -chdir="$TF_DIR" apply -auto-approve -input=false -var-file="$RUNTIME_DIR/terraform.tfvars.json" | tee -a "$LOG_FILE" || return 1
-  show_outputs || return 1
-  test_application false || return 1
+  say OK 'Deployment completed. Run menu option 3 in a new session to verify ALB and database connectivity.'
 }
 
 delete_state_versions() {
@@ -339,7 +333,7 @@ main() {
     read -r -p 'Select an option [1-4]: ' choice || choice=4
     choice="${choice%$'\r'}"
     case "$choice" in
-      1) if ! create_infrastructure; then say ERROR 'Creation failed. No further deployment steps were run.'; fi ;;
+      1) if create_infrastructure; then say INFO 'Creation completed. Exiting.'; return 0; else say ERROR 'Creation failed. No further deployment steps were run.'; fi ;;
       2) if ! delete_infrastructure; then say ERROR 'Deletion failed. Check the log before retrying.'; fi ;;
       3) if ! test_application true; then say ERROR 'Connectivity test failed.'; fi ;;
       4) say INFO 'Exiting.'; return 0 ;;

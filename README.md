@@ -48,6 +48,8 @@ The menu accepts the following actions:
 
 The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, and the board health URL. Open `https://<your-domain>/app/` to use the board.
 
+After a successful create, the script exits immediately instead of waiting for application health checks. DNS, ALB target health, and Tomcat startup can settle independently; start the script again and use menu option 3 when you want to run the explicit connectivity test.
+
 ## Security model
 
 | Layer | Allowed inbound traffic |
@@ -56,6 +58,8 @@ The successful create output includes the HTTPS URLs, ALB DNS name, Bastion publ
 | Nginx | HTTP 80 from the ALB; SSH 22 from Bastion |
 | Tomcat | TCP 8080 from Nginx; SSH 22 from Bastion |
 | RDS | MySQL 3306 from Tomcat only |
+
+Nginx 2A renders a blue operational landing page and Nginx 2C renders a red one. Refreshing the root domain can therefore show ALB traffic moving between the two healthy edge nodes.
 
 RDS is private, encrypted, and uses `manage_master_user_password`; the generated password stays in Secrets Manager. Tomcat reads only that secret through a least-privilege instance role. No database credential is stored in Terraform variables, logs, source files, or browser responses.
 

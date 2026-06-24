@@ -36,8 +36,10 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 SQL
 
-rm -rf /var/lib/tomcat9/webapps/ROOT/*
-cat > /var/lib/tomcat9/webapps/ROOT/index.jsp <<'JSP'
+APP_ROOT=/var/lib/tomcat9/webapps/app
+rm -rf "$APP_ROOT"
+install -d -m 0755 "$APP_ROOT"
+cat > "$APP_ROOT/index.jsp" <<'JSP'
 <%@ page import="java.sql.*" %><%@ page contentType="text/html; charset=UTF-8" %>
 <%!
   Connection db() throws Exception { Class.forName("org.mariadb.jdbc.Driver"); return DriverManager.getConnection(System.getenv("BOARD_DB_URL"), System.getenv("BOARD_DB_USER"), System.getenv("BOARD_DB_PASSWORD")); }
@@ -48,7 +50,7 @@ cat > /var/lib/tomcat9/webapps/ROOT/index.jsp <<'JSP'
 </style></head><body><main><header class="hero"><span class="eyebrow">ALB · Nginx · Tomcat · RDS</span><h1>Infrastructure notes.</h1><p>A minimal board backed by private RDS MySQL. Requests are served by either Tomcat node behind the Nginx proxy tier.</p></header><section class="layout"><div class="card"><% boolean hasPosts=false; try(Connection c=db(); Statement s=c.createStatement(); ResultSet r=s.executeQuery("SELECT id,title,author,content,created_at FROM posts ORDER BY id DESC")){while(r.next()){hasPosts=true;%><article class="post"><h2><%=esc(r.getString("title"))%></h2><div class="meta"><%=esc(r.getString("author"))%> · <%=r.getTimestamp("created_at")%></div><p class="body"><%=esc(r.getString("content"))%></p></article><%}}catch(Exception error){response.setStatus(500);%><p class="empty">The board could not reach its database.</p><%}if(!hasPosts){%><p class="empty">No notes yet. Add the first one.</p><%}%></div><aside class="card"><span class="eyebrow">New note</span><form method="post" action="create.jsp"><div class="field"><label for="title">Title</label><input id="title" name="title" maxlength="200" required></div><div class="field"><label for="author">Author</label><input id="author" name="author" maxlength="60" required></div><div class="field"><label for="content">Message</label><textarea id="content" name="content" maxlength="5000" required></textarea></div><button type="submit">Publish note</button></form></aside></section></main></body></html>
 JSP
 
-cat > /var/lib/tomcat9/webapps/ROOT/create.jsp <<'JSP'
+cat > "$APP_ROOT/create.jsp" <<'JSP'
 <%@ page import="java.sql.*" %><%@ page contentType="text/html; charset=UTF-8" %>
 <%!
   Connection db() throws Exception { Class.forName("org.mariadb.jdbc.Driver"); return DriverManager.getConnection(System.getenv("BOARD_DB_URL"), System.getenv("BOARD_DB_USER"), System.getenv("BOARD_DB_PASSWORD")); }
@@ -57,11 +59,11 @@ cat > /var/lib/tomcat9/webapps/ROOT/create.jsp <<'JSP'
 <% request.setCharacterEncoding("UTF-8"); if(!"POST".equals(request.getMethod())){response.sendError(405);return;} String title=clean(request.getParameter("title")),author=clean(request.getParameter("author")),content=clean(request.getParameter("content")); if(title.isEmpty()||author.isEmpty()||content.isEmpty()||title.length()>200||author.length()>60||content.length()>5000){response.sendError(400,"Invalid post input.");return;} try(Connection c=db();PreparedStatement s=c.prepareStatement("INSERT INTO posts(title,author,content) VALUES(?,?,?)")){s.setString(1,title);s.setString(2,author);s.setString(3,content);s.executeUpdate();}response.sendRedirect("index.jsp"); %>
 JSP
 
-cat > /var/lib/tomcat9/webapps/ROOT/health.jsp <<'JSP'
+cat > "$APP_ROOT/health.jsp" <<'JSP'
 <%@ page import="java.sql.*" %><%@ page contentType="text/plain; charset=UTF-8" %>
 <% try { Class.forName("org.mariadb.jdbc.Driver"); try(Connection c=DriverManager.getConnection(System.getenv("BOARD_DB_URL"),System.getenv("BOARD_DB_USER"),System.getenv("BOARD_DB_PASSWORD")); Statement s=c.createStatement()){s.execute("SELECT 1");out.print("database=connected");} } catch(Exception error) { response.setStatus(503);out.print("database=unavailable"); } %>
 JSP
 
-chown -R tomcat:tomcat /var/lib/tomcat9/webapps/ROOT
+chown -R tomcat:tomcat "$APP_ROOT"
 systemctl daemon-reload
 systemctl enable --now tomcat9
