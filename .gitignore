@@ -6,3 +6,5 @@ terraform.tfvars
 terraform.tfvars.json
 crash.log
 crash.*.log
+outputs/
+.auto-infra/

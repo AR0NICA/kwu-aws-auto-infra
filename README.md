@@ -1,77 +1,113 @@
-# KWU AWS AUTO INFRA
+# AWS Auto Infra
 
-Modular Bash automation for a highly available AWS 3-Tier sample environment in `ap-northeast-2`.
-
-## Architecture
+A CloudShell-first Terraform project that deploys a secure training 3-tier application in `ap-northeast-2`.
 
 ```text
-Internet
-  │
-Route 53 → Application Load Balancer
-              │
-              ├─ Nginx 2A (public subnet) ─┐
-              └─ Nginx 2C (public subnet) ─┼─→ Tomcat 2A / 2C (private subnets)
-                                             │
-                                             └─→ RDS MySQL (private DB subnets)
-
-Admin PC → Bastion (public subnet) → Nginx / Tomcat via SSH
+Internet → Route 53 → ALB (HTTPS) → Nginx (2A / 2C) → Tomcat (2A / 2C) → private RDS MySQL
+                                           ▲
+Admin network → Bastion ───────────────────┘
 ```
 
-![KWU AWS AUTO INFRA 3-Tier architecture](assets/3-tier-Infra-arch.png)
+![3-tier infrastructure architecture](assets/3-tier-Infra-arch.png)
 
-`auto_infra.sh` composes the shared infrastructure, IAM/Secrets Manager, and JSP board modules. It creates the VPC, Bastion, Nginx, Tomcat, private RDS MySQL, ALB, target group, and Route 53 alias record.
+The project uses two Availability Zones for Nginx and Tomcat, one NAT Gateway and a single-AZ RDS instance to keep a lab deployment affordable. The ALB is the only public application endpoint. Nginx, Tomcat, and RDS are not directly reachable from the internet.
+
+## What is automated
+
+- Terraform installation in CloudShell when it is missing, including release checksum verification.
+- Per-account S3 Terraform state backend with versioning, SSE-S3 encryption, public-access blocking, and state locking.
+- VPC, public/private subnets, IGW, NAT Gateway, route tables, security groups, Bastion, Nginx, Tomcat, private RDS MySQL, and ALB.
+- ACM certificate request, Route 53 DNS validation, HTTP-to-HTTPS redirect, and Route 53 alias records for the apex and `www` domains.
+- An RDS-backed JSP board with input validation, parameterized SQL, escaped output, and a database health endpoint.
+- English progress logs under `outputs/` and an English interactive menu.
 
 ## Prerequisites
 
-- AWS CLI configured with credentials that can create and delete the listed AWS resources.
-- A public Route 53 hosted zone for the domain entered at runtime.
-- An EC2 key pair named `kwuaws` in `ap-northeast-2`.
-- The AMI configured in `lib/infrastructure.sh` must be available in the selected region.
-- Bash, `curl`, and `base64`.
+- AWS CloudShell with AWS CLI credentials for `ap-northeast-2`.
+- A public Route 53 hosted zone already delegated to the domain you enter. The domain must match that hosted zone exactly.
+- An existing EC2 key pair in `ap-northeast-2`.
+- IAM permission to create the listed VPC, EC2, IAM, ELBv2, RDS, ACM, Route 53, Secrets Manager, and S3 resources. The first run must also be able to configure the generated S3 state bucket.
 
-The script defaults to `ap-northeast-2`. Its AMI and key-pair name are declared near the top of `lib/infrastructure.sh` if your environment differs.
+No ACM certificate, RDS password, Terraform installation, or state bucket is required beforehand.
 
 ## CloudShell usage
 
 ```bash
 git clone https://github.com/AR0NICA/kwu-aws-auto-infra.git
-cd aws-auto-infra
-chmod +x auto_infra.sh
-ADMIN_CIDR=<YOUR_PUBLIC_IP>/32 ./auto_infra.sh
+cd kwu-aws-auto-infra
+chmod +x auto_infra.sh scripts/lib.sh
+./auto_infra.sh
 ```
 
-Use menu option `1` to create the environment, `2` to delete it, and `3` to test the ALB and Tomcat proxy endpoint.
+The menu accepts the following actions:
 
-`ADMIN_CIDR` controls SSH access to Bastion. Do not leave it open to the internet in a real environment. For example:
+1. **Create infrastructure** — enter the Route 53 domain and EC2 key-pair name. The script validates both before Terraform applies the stack.
+2. **Delete all infrastructure** — enter the same domain and key-pair name, then confirm. RDS is deleted without a final snapshot.
+3. **Test ALB and application connectivity** — enter the domain. The script verifies two healthy ALB targets and retries the HTTPS database-health endpoint.
+4. **Exit** — makes no AWS changes.
+
+The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, and the board health URL. Open `https://<your-domain>/app/` to use the board.
+
+## Security model
+
+| Layer | Allowed inbound traffic |
+| --- | --- |
+| ALB | HTTP 80 and HTTPS 443 from the internet |
+| Nginx | HTTP 80 from the ALB; SSH 22 from Bastion |
+| Tomcat | TCP 8080 from Nginx; SSH 22 from Bastion |
+| RDS | MySQL 3306 from Tomcat only |
+
+RDS is private, encrypted, and uses `manage_master_user_password`; the generated password stays in Secrets Manager. Tomcat reads only that secret through a least-privilege instance role. No database credential is stored in Terraform variables, logs, source files, or browser responses.
+
+The Bastion SSH rule defaults to the CloudShell egress IP detected during creation. To authorize another fixed administrator network without changing the code, set it before starting the script:
 
 ```bash
-ADMIN_CIDR=203.0.113.10/32 ./auto_infra.sh
+export AUTO_INFRA_ADMIN_CIDR='203.0.113.10/32'
+./auto_infra.sh
 ```
 
-## After deployment
+## State and deletion
 
-The final **Deployment Summary** prints:
+Terraform state is stored per domain at:
 
-- Bastion public IP
-- ALB URL
-- Route 53 domain URL
-- Tomcat sample application URL at `http://<domain>/app/`
-- Private RDS endpoint
+```text
+s3://aws-auto-infra-tfstate-<account-id>-ap-northeast-2/deployments/<domain>/terraform.tfstate
+```
 
-Connect to the private instances through Bastion using the same EC2 key pair. Tomcat port `8080` is reachable only from the Nginx security groups; MySQL port `3306` is reachable only from Tomcat.
+Delete uses Terraform state only; it never searches by broad tags or deletes unrelated AWS resources. It removes the selected deployment’s state versions after a successful destroy and removes the backend bucket only when it was created by this project and is empty. The Route 53 hosted zone and the EC2 key pair are user-owned prerequisites and are retained.
 
-## Security and data handling
+## Costs and lifecycle
 
-- RDS is private and uses an AWS-managed master password in Secrets Manager. The password is not printed or copied to EC2 user-data.
-- The Tomcat instance profile can read only the RDS-managed secret; credentials are not printed or placed in the repository.
-- The `/app/` JSP creates the `posts` table when needed and provides a JDBC-backed board with create, read, and delete operations.
-- To add database-backed application behavior, give the Tomcat instance profile least-privilege access to the specific RDS-managed secret and retrieve it at application runtime.
+This project creates billable resources: a NAT Gateway, ALB, five EC2 instances, RDS MySQL, and a small S3 state backend. The current lab defaults are one NAT Gateway, single-AZ RDS, no RDS backups, and no final RDS snapshot. Use menu option 2 when the lab is no longer required.
 
-## Cost and deletion
+## Repository structure
 
-This deployment creates billable services, including a NAT Gateway, Application Load Balancer, EC2 instances, and RDS MySQL. Delete the environment with menu option `2` when it is no longer needed.
+```text
+auto_infra.sh             # single interactive entry point
+scripts/lib.sh            # Terraform bootstrap, validation, TUI actions, logging
+terraform/
+  modules/network/        # VPC, subnets, NAT, and routing
+  modules/security/       # least-privilege security groups
+  modules/database/       # private RDS and managed password
+  modules/compute/        # EC2, IAM role, Nginx, Tomcat board templates
+  modules/load_balancer/  # ALB, target group, HTTP/HTTPS listeners
+  modules/dns/            # Route 53 lookup and ACM DNS validation
+outputs/                  # ignored runtime logs
+.auto-infra/              # ignored generated runtime configuration
+```
 
-The deletion workflow removes the RDS instance with `--skip-final-snapshot`; back up any required data before deletion.
+## Verification for maintainers
+
+Run these checks after Terraform is available:
+
+```bash
+bash -n auto_infra.sh scripts/lib.sh
+terraform -chdir=terraform fmt -check -recursive
+terraform -chdir=terraform init -backend=false
+terraform -chdir=terraform validate
+```
+
+Do not run `terraform apply` directly. The entry script supplies the generated backend configuration, validates the domain and key pair, and writes the non-secret runtime variable file.
 
 ## License
 

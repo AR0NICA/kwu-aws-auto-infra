@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y nginx
+
+cat > /var/www/html/index.html <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edge Tier Operational</title>
+  <style>
+    :root { color-scheme: dark; --bg:#07111f; --panel:#0e1d31; --soft:#112843; --line:#214365; --accent:#5de0ff; --ok:#76efb5; --text:#eff9ff; --muted:#9db4c8; }
+    * { box-sizing:border-box; } body { min-height:100vh; margin:0; display:grid; place-items:center; padding:24px; color:var(--text); background:radial-gradient(circle at 10% 12%,#15558c 0,transparent 35%),radial-gradient(circle at 90% 80%,#233b7a 0,transparent 38%),var(--bg); font-family:Inter,ui-sans-serif,system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+    .panel { width:min(720px,100%); padding:clamp(28px,6vw,56px); border-radius:28px; background:linear-gradient(145deg,#122a47e8,#0b1728ed); box-shadow:0 28px 70px #0009, inset 0 1px #ffffff12; }
+    .eyebrow { display:inline-flex; align-items:center; gap:9px; color:var(--ok); font-size:.76rem; font-weight:800; letter-spacing:.14em; text-transform:uppercase; } .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); box-shadow:0 0 18px var(--ok); }
+    h1 { max-width:12ch; margin:18px 0 14px; font-size:clamp(2.2rem,7vw,4.6rem); line-height:.98; letter-spacing:-.065em; text-wrap:balance; } p { max-width:59ch; color:var(--muted); font-size:1.05rem; line-height:1.7; text-wrap:pretty; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:34px; } .item { min-height:106px; padding:17px; border-radius:16px; background:var(--soft); box-shadow:inset 0 1px #ffffff10; } .label { display:block; color:var(--muted); font-size:.72rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; } .value { display:block; margin-top:12px; color:var(--accent); font-family:ui-monospace,SFMono-Regular,monospace; font-size:.95rem; font-weight:700; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+    a { display:inline-flex; min-height:42px; align-items:center; margin-top:30px; padding:0 17px; border-radius:13px; color:#03121e; background:var(--accent); font-weight:850; text-decoration:none; transition-property:transform,box-shadow; transition-duration:160ms; transition-timing-function:cubic-bezier(.2,0,0,1); box-shadow:0 10px 24px #30c9ef4d; } a:hover { transform:translateY(-2px); box-shadow:0 14px 30px #30c9ef66; } a:active { transform:scale(.96); }
+    @media (max-width:560px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <span class="eyebrow"><span class="dot"></span>Edge tier operational</span>
+    <h1>Nginx is ready for traffic.</h1>
+    <p>This public web node is healthy behind the Application Load Balancer and proxies application requests to the private Tomcat tier.</p>
+    <section class="grid"><div class="item"><span class="label">Availability Zone</span><span class="value">ap-northeast-2${zone}</span></div><div class="item"><span class="label">Node</span><span class="value">NGINX-${zone}</span></div></section>
+    <a href="/app/">Open the board</a>
+  </main>
+</body>
+</html>
+HTML
+
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/conf.d/tomcat-proxy.conf <<'NGINX'
+upstream tomcat_backend {
+    least_conn;
+%{ for ip in tomcat_private_ips ~}
+    server ${ip}:8080 max_fails=3 fail_timeout=10s;
+%{ endfor ~}
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+    root /var/www/html;
+    index index.html;
+    add_header X-Auto-Infra-Node "nginx-${zone}" always;
+
+    location /app/ {
+        proxy_pass http://tomcat_backend/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+    }
+}
+NGINX
+
+nginx -t
+systemctl enable --now nginx
