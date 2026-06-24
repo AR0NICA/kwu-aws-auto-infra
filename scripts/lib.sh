@@ -234,6 +234,12 @@ show_outputs() {
   say OK 'Deployment completed.'
 }
 
+terraform_state_exists() {
+  aws s3api head-object \
+    --bucket "$BACKEND_BUCKET" \
+    --key "$(state_key)" >/dev/null 2>&1
+}
+
 create_infrastructure() {
   banner
   prompt_domain || return 0
@@ -241,7 +247,11 @@ create_infrastructure() {
   initialize_terraform || return 1
   verify_prerequisites || return 1
   local state_entries
-  state_entries="$("$TERRAFORM_BIN" -chdir="$TF_DIR" state list)" || return 1
+  if terraform_state_exists; then
+    state_entries="$("$TERRAFORM_BIN" -chdir="$TF_DIR" state list)" || return 1
+  else
+    state_entries=""
+  fi
   if [[ -z "$state_entries" ]]; then
     assert_records_unused || return 1
     assert_no_legacy_stack || return 1
