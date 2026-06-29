@@ -137,7 +137,12 @@ resource "aws_security_group" "database" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "all" {
-  for_each          = toset([aws_security_group.nginx.id, aws_security_group.tomcat.id, aws_security_group.database.id])
+  for_each = {
+    nginx    = aws_security_group.nginx.id
+    tomcat   = aws_security_group.tomcat.id
+    database = aws_security_group.database.id
+  }
+
   security_group_id = each.value
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"

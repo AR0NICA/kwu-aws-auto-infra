@@ -1,6 +1,8 @@
 locals {
   project_name     = "kwu-prd-vpc"
   dev_project_name = "kwu-dev-vpc"
+  prd_vpc_cidr     = "10.250.0.0/16"
+  dev_vpc_cidr     = "10.230.0.0/16"
   common_tags = {
     Project     = "aws-auto-infra"
     ManagedBy   = "Terraform"
@@ -26,7 +28,7 @@ locals {
 module "network" {
   source           = "./modules/network"
   name_prefix      = local.project_name
-  vpc_cidr         = "10.250.0.0/16"
+  vpc_cidr         = local.prd_vpc_cidr
   public_subnets   = local.public_subnets
   tomcat_subnets   = local.tomcat_subnets
   database_subnets = local.database_subnets
@@ -38,7 +40,7 @@ module "security" {
   vpc_id      = module.network.vpc_id
   admin_cidr  = var.admin_cidr
   peer_cidr_blocks = [
-    module.dev_environment.vpc_cidr
+    local.dev_vpc_cidr
   ]
 }
 
@@ -90,10 +92,10 @@ module "dev_environment" {
   }
 
   name_prefix = local.dev_project_name
-  vpc_cidr    = "10.230.0.0/16"
+  vpc_cidr    = local.dev_vpc_cidr
   key_name    = var.dev_key_name
   admin_cidr  = var.admin_cidr
-  prd_cidr    = module.network.vpc_cidr
+  prd_cidr    = local.prd_vpc_cidr
 }
 
 module "peering" {
@@ -105,18 +107,18 @@ module "peering" {
 
   name_prefix = "kwu-prd-dev"
   prd_vpc_id  = module.network.vpc_id
-  prd_cidr    = module.network.vpc_cidr
-  prd_route_table_ids = [
-    module.network.public_route_table_id,
-    module.network.private_route_table_id
-  ]
+  prd_cidr    = local.prd_vpc_cidr
+  prd_route_table_ids = {
+    public  = module.network.public_route_table_id
+    private = module.network.private_route_table_id
+  }
   dev_vpc_id = module.dev_environment.vpc_id
-  dev_cidr   = module.dev_environment.vpc_cidr
+  dev_cidr   = local.dev_vpc_cidr
   dev_region = var.dev_region
-  dev_route_table_ids = [
-    module.dev_environment.public_route_table_id,
-    module.dev_environment.private_route_table_id
-  ]
+  dev_route_table_ids = {
+    public  = module.dev_environment.public_route_table_id
+    private = module.dev_environment.private_route_table_id
+  }
 }
 
 resource "aws_route53_record" "website" {

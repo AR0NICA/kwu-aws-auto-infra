@@ -1,11 +1,11 @@
 variable "name_prefix" { type = string }
 variable "prd_vpc_id" { type = string }
 variable "prd_cidr" { type = string }
-variable "prd_route_table_ids" { type = list(string) }
+variable "prd_route_table_ids" { type = map(string) }
 variable "dev_vpc_id" { type = string }
 variable "dev_cidr" { type = string }
 variable "dev_region" { type = string }
-variable "dev_route_table_ids" { type = list(string) }
+variable "dev_route_table_ids" { type = map(string) }
 
 terraform {
   required_providers {
@@ -43,7 +43,7 @@ resource "aws_vpc_peering_connection_accepter" "this" {
 }
 
 resource "aws_route" "prd_to_dev" {
-  for_each                  = toset(var.prd_route_table_ids)
+  for_each                  = var.prd_route_table_ids
   route_table_id            = each.value
   destination_cidr_block    = var.dev_cidr
   vpc_peering_connection_id = aws_vpc_peering_connection.this.id
@@ -52,7 +52,7 @@ resource "aws_route" "prd_to_dev" {
 
 resource "aws_route" "dev_to_prd" {
   provider                  = aws.dev
-  for_each                  = toset(var.dev_route_table_ids)
+  for_each                  = var.dev_route_table_ids
   route_table_id            = each.value
   destination_cidr_block    = var.prd_cidr
   vpc_peering_connection_id = aws_vpc_peering_connection.this.id
