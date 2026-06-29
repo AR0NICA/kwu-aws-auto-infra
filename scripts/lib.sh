@@ -256,6 +256,7 @@ terraform_state_exists() {
 }
 
 create_infrastructure() {
+  local plan_file
   banner
   prompt_domain || return 0
   prompt_key_names || return 0
@@ -274,8 +275,13 @@ create_infrastructure() {
     say INFO 'Existing Terraform state found. Applying the managed deployment update.'
   fi
   write_variables || return 1
-  say INFO 'Creating infrastructure. RDS and ACM validation can take several minutes.'
-  "$TERRAFORM_BIN" -chdir="$TF_DIR" apply -auto-approve -input=false -var-file="$RUNTIME_DIR/terraform.tfvars.json" | tee -a "$LOG_FILE" || return 1
+  plan_file="$RUNTIME_DIR/create.tfplan"
+  rm -f "$plan_file"
+  say INFO 'Preparing a Terraform execution plan.'
+  "$TERRAFORM_BIN" -chdir="$TF_DIR" plan -input=false -out="$plan_file" -var-file="$RUNTIME_DIR/terraform.tfvars.json" | tee -a "$LOG_FILE" || { rm -f "$plan_file"; return 1; }
+  say INFO 'Creating infrastructure from the saved Terraform plan. RDS, NAT Gateway, ACM validation, and PCX activation can take several minutes.'
+  "$TERRAFORM_BIN" -chdir="$TF_DIR" apply -input=false "$plan_file" | tee -a "$LOG_FILE" || { rm -f "$plan_file"; return 1; }
+  rm -f "$plan_file"
   say OK 'Deployment completed. Run menu option 3 in a new session to verify ALB and database connectivity.'
 }
 
