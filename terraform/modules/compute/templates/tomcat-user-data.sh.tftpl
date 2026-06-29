@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 SQL
 
-APP_ROOT=/var/lib/tomcat9/webapps/app
+APP_ROOT=/var/lib/tomcat9/webapps/ROOT
+rm -rf /var/lib/tomcat9/webapps/app
 rm -rf "$APP_ROOT"
 install -d -m 0755 "$APP_ROOT"
 cat > "$APP_ROOT/index.jsp" <<'JSP'
@@ -66,4 +67,5 @@ JSP
 
 chown -R tomcat:tomcat "$APP_ROOT"
 systemctl daemon-reload
-systemctl enable --now tomcat9
+systemctl enable tomcat9
+systemctl restart tomcat9

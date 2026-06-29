@@ -293,7 +293,7 @@ delete_infrastructure() {
 }
 
 test_application() {
-  local prompt="${1:-true}" domain_url target_group_arn states response attempt
+  local prompt="${1:-true}" domain_url target_group_arn states response attempt board_status
   if [[ "$prompt" == true ]]; then
     banner
     prompt_domain || return 0
@@ -309,6 +309,9 @@ test_application() {
     sleep 10
   done
   [[ "$states" == *healthy* && "$(wc -w <<<"$states")" -eq 2 ]] || { fail "ALB targets are not both healthy: ${states:-none}"; return 1; }
+  board_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --location --max-time 10 "$domain_url/app/" 2>/dev/null || true)"
+  [[ "$board_status" == '200' ]] || { fail "The board page did not return HTTP 200. Current status: ${board_status:-request_failed}"; return 1; }
+  say OK 'Board page returned HTTP 200.'
   for attempt in {1..30}; do
     response="$(curl --fail --silent --show-error --location --max-time 10 "$domain_url/app/health.jsp" 2>/dev/null || true)"
     [[ "$response" == *'database=connected'* ]] && break
