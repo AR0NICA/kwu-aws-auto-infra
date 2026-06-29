@@ -46,7 +46,7 @@ The menu accepts the following actions:
 3. **Test ALB and application connectivity** — enter the domain. The script verifies two healthy ALB targets and retries the HTTPS database-health endpoint.
 4. **Exit** — makes no AWS changes.
 
-The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, and the board health URL. Open `https://<your-domain>/app/` to use the board. Nginx exposes `/app/` publicly and strips that prefix before proxying to the private Tomcat ROOT application, which avoids Tomcat context-path deployment ambiguity.
+The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, and the board health URL. Open `https://<your-domain>/app/` to use the board. Nginx exposes `/app/` publicly and strips that prefix before proxying to the private Tomcat ROOT application. The same JSP board is also deployed to the Tomcat `/app` context as a fallback, so prefix-stripped and non-stripped proxy paths both resolve instead of returning a Tomcat 404.
 
 After a successful create, the script exits immediately instead of waiting for application health checks. DNS, ALB target health, and Tomcat startup can settle independently; start the script again and use menu option 3 when you want to run the explicit connectivity test.
 

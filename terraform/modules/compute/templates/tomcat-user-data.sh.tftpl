@@ -1,71 +1,104 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
+exec > >(tee -a /var/log/kwu-tomcat-user-data.log) 2>&1
 
 apt-get update
-apt-get install -y openjdk-17-jdk tomcat9 libmariadb-java mariadb-client awscli jq
+apt-get install -y openjdk-17-jdk tomcat9 libmariadb-java awscli jq curl
 ln -sf /usr/share/java/mariadb-java-client.jar /var/lib/tomcat9/lib/mariadb-java-client.jar
 
+write_board_app() {
+  local app_root="$1"
+  rm -rf "$app_root"
+  install -d -m 0755 "$app_root/WEB-INF"
+
+  cat > "$app_root/WEB-INF/web.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee http://xmlns.jcp.org/xml/ns/javaee/web-app_4_0.xsd"
+         version="4.0">
+  <display-name>KWU Auto Infra Board</display-name>
+  <welcome-file-list>
+    <welcome-file>index.jsp</welcome-file>
+  </welcome-file-list>
+</web-app>
+XML
+
+  cat > "$app_root/index.jsp" <<'JSP'
+<%@ page import="java.sql.*" %><%@ page contentType="text/html; charset=UTF-8" %>
+<%!
+  Connection db() throws Exception {
+    Class.forName("org.mariadb.jdbc.Driver");
+    return DriverManager.getConnection(System.getenv("BOARD_DB_URL"), System.getenv("BOARD_DB_USER"), System.getenv("BOARD_DB_PASSWORD"));
+  }
+  void ensureSchema(Connection c) throws Exception {
+    try (Statement s = c.createStatement()) {
+      s.executeUpdate("CREATE TABLE IF NOT EXISTS posts (id BIGINT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(200) NOT NULL, author VARCHAR(60) NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    }
+  }
+  String esc(String value) {
+    if (value == null) return "";
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
+  }
+%>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Infra Notes</title><style>
+:root{color-scheme:dark;--bg:#07111f;--panel:#0e1d31;--soft:#112843;--line:#214365;--accent:#5de0ff;--text:#eff9ff;--muted:#9db4c8}*{box-sizing:border-box}body{margin:0;padding:28px 18px 70px;background:radial-gradient(circle at 12% 8%,#15558c 0,transparent 34%),#07111f;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}main{width:min(920px,100%);margin:auto}.hero{margin:22px 0 28px}.eyebrow{color:var(--accent);font-size:.75rem;font-weight:850;letter-spacing:.13em;text-transform:uppercase}h1{margin:10px 0;font-size:clamp(2.4rem,7vw,5rem);letter-spacing:-.07em;line-height:.95;text-wrap:balance}p{color:var(--muted);line-height:1.7;text-wrap:pretty}.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px}.card{padding:25px;border-radius:24px;background:#0e1d31e8;box-shadow:0 24px 65px #0008,inset 0 1px #ffffff10}.post{padding:20px;border-radius:16px;background:var(--soft);box-shadow:inset 0 1px #ffffff0d}.post+ .post{margin-top:12px}.post h2{margin:0;font-size:1.18rem}.meta{margin-top:8px;color:var(--muted);font-size:.8rem;font-variant-numeric:tabular-nums}.body{white-space:pre-wrap}.field{display:grid;gap:7px;margin-top:13px}.field label{color:var(--muted);font-size:.78rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase}input,textarea{width:100%;border:0;border-radius:12px;padding:13px;background:#07111f;color:var(--text);font:inherit;outline:1px solid #214365;transition-property:outline-color,box-shadow;transition-duration:150ms}input:focus,textarea:focus{outline-color:var(--accent);box-shadow:0 0 0 3px #5de0ff20}textarea{min-height:145px;resize:vertical}button{min-height:44px;margin-top:16px;padding:0 17px;border:0;border-radius:13px;background:var(--accent);color:#03121e;font:inherit;font-weight:850;cursor:pointer;transition-property:transform,box-shadow;transition-duration:160ms;transition-timing-function:cubic-bezier(.2,0,0,1);box-shadow:0 10px 24px #30c9ef4d}button:hover{transform:translateY(-2px);box-shadow:0 14px 30px #30c9ef66}button:active{transform:scale(.96)}.empty{color:var(--muted);padding:30px 0;text-align:center}.error{border:1px solid #ff718655;background:#2b1019;color:#fff1f3}@media(max-width:760px){.layout{grid-template-columns:1fr}.card{padding:20px}}
+</style></head><body><main><header class="hero"><span class="eyebrow">ALB · Nginx · Tomcat · RDS</span><h1>Infrastructure notes.</h1><p>A minimal board backed by private RDS MySQL. Requests are served by either Tomcat node behind the Nginx proxy tier.</p></header><section class="layout"><div class="card"><% boolean hasPosts=false; try(Connection c=db()){ensureSchema(c); try(Statement s=c.createStatement(); ResultSet r=s.executeQuery("SELECT id,title,author,content,created_at FROM posts ORDER BY id DESC")){while(r.next()){hasPosts=true;%><article class="post"><h2><%=esc(r.getString("title"))%></h2><div class="meta"><%=esc(r.getString("author"))%> · <%=r.getTimestamp("created_at")%></div><p class="body"><%=esc(r.getString("content"))%></p></article><%}}}catch(Exception error){response.setStatus(500);%><p class="empty error">The board is deployed, but the database connection is not ready yet.</p><%}if(response.getStatus()<500&&!hasPosts){%><p class="empty">No notes yet. Add the first one.</p><%}%></div><aside class="card"><span class="eyebrow">New note</span><form method="post" action="/app/create.jsp"><div class="field"><label for="title">Title</label><input id="title" name="title" maxlength="200" required></div><div class="field"><label for="author">Author</label><input id="author" name="author" maxlength="60" required></div><div class="field"><label for="content">Message</label><textarea id="content" name="content" maxlength="5000" required></textarea></div><button type="submit">Publish note</button></form></aside></section></main></body></html>
+JSP
+
+  cat > "$app_root/create.jsp" <<'JSP'
+<%@ page import="java.sql.*" %><%@ page contentType="text/html; charset=UTF-8" %>
+<%!
+  Connection db() throws Exception { Class.forName("org.mariadb.jdbc.Driver"); return DriverManager.getConnection(System.getenv("BOARD_DB_URL"), System.getenv("BOARD_DB_USER"), System.getenv("BOARD_DB_PASSWORD")); }
+  void ensureSchema(Connection c) throws Exception { try (Statement s = c.createStatement()) { s.executeUpdate("CREATE TABLE IF NOT EXISTS posts (id BIGINT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(200) NOT NULL, author VARCHAR(60) NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"); } }
+  String clean(String value) { return value == null ? "" : value.trim(); }
+%>
+<% request.setCharacterEncoding("UTF-8"); if(!"POST".equals(request.getMethod())){response.sendError(405);return;} String title=clean(request.getParameter("title")),author=clean(request.getParameter("author")),content=clean(request.getParameter("content")); if(title.isEmpty()||author.isEmpty()||content.isEmpty()||title.length()>200||author.length()>60||content.length()>5000){response.sendError(400,"Invalid post input.");return;} try(Connection c=db()){ensureSchema(c);try(PreparedStatement s=c.prepareStatement("INSERT INTO posts(title,author,content) VALUES(?,?,?)")){s.setString(1,title);s.setString(2,author);s.setString(3,content);s.executeUpdate();}}response.sendRedirect("/app/"); %>
+JSP
+
+  cat > "$app_root/health.jsp" <<'JSP'
+<%@ page import="java.sql.*" %><%@ page contentType="text/plain; charset=UTF-8" %>
+<%! void ensureSchema(Connection c) throws Exception { try (Statement s = c.createStatement()) { s.executeUpdate("CREATE TABLE IF NOT EXISTS posts (id BIGINT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(200) NOT NULL, author VARCHAR(60) NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"); } } %>
+<% try { Class.forName("org.mariadb.jdbc.Driver"); try(Connection c=DriverManager.getConnection(System.getenv("BOARD_DB_URL"),System.getenv("BOARD_DB_USER"),System.getenv("BOARD_DB_PASSWORD")); Statement s=c.createStatement()){ensureSchema(c);s.execute("SELECT 1");out.print("database=connected");} } catch(Exception error) { response.setStatus(503);out.print("database=unavailable"); } %>
+JSP
+}
+
+rm -rf /var/lib/tomcat9/webapps/ROOT /var/lib/tomcat9/webapps/app
+write_board_app /var/lib/tomcat9/webapps/ROOT
+write_board_app /var/lib/tomcat9/webapps/app
+chown -R tomcat:tomcat /var/lib/tomcat9/webapps/ROOT /var/lib/tomcat9/webapps/app
+
 secret=""
-for attempt in {1..36}; do
+for attempt in {1..60}; do
   secret="$(aws secretsmanager get-secret-value --secret-id '${database_secret_arn}' --region '${aws_region}' --query SecretString --output text 2>/dev/null || true)"
   [[ -n "$secret" && "$secret" != "None" ]] && break
   sleep 10
 done
-[[ -n "$secret" && "$secret" != "None" ]] || { echo 'RDS secret was not available.' >&2; exit 1; }
 
-db_user="$(jq -r '.username' <<<"$secret")"
-db_password="$(jq -r '.password' <<<"$secret")"
-escape_systemd() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
-install -d -m 0755 /etc/systemd/system/tomcat9.service.d
-{
-  printf '[Service]\n'
-  printf 'Environment="BOARD_DB_URL=jdbc:mariadb://${database_endpoint}:3306/${database_name}"\n'
-  printf 'Environment="BOARD_DB_USER=%s"\n' "$(printf '%s' "$db_user" | escape_systemd)"
-  printf 'Environment="BOARD_DB_PASSWORD=%s"\n' "$(printf '%s' "$db_password" | escape_systemd)"
-} > /etc/systemd/system/tomcat9.service.d/board.conf
-chmod 0600 /etc/systemd/system/tomcat9.service.d/board.conf
+if [[ -n "$secret" && "$secret" != "None" ]]; then
+  db_user="$(jq -r '.username' <<<"$secret")"
+  db_password="$(jq -r '.password' <<<"$secret")"
+  escape_systemd() { sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g'; }
+  install -d -m 0755 /etc/systemd/system/tomcat9.service.d
+  {
+    printf '[Service]\n'
+    printf 'Environment="BOARD_DB_URL=jdbc:mariadb://${database_endpoint}:3306/${database_name}"\n'
+    printf 'Environment="BOARD_DB_USER=%s"\n' "$(printf '%s' "$db_user" | escape_systemd)"
+    printf 'Environment="BOARD_DB_PASSWORD=%s"\n' "$(printf '%s' "$db_password" | escape_systemd)"
+  } > /etc/systemd/system/tomcat9.service.d/board.conf
+  chmod 0600 /etc/systemd/system/tomcat9.service.d/board.conf
+else
+  echo 'RDS secret was not available. The board app was deployed, but database health will fail until credentials are configured.' >&2
+fi
 
-MYSQL_PWD="$db_password" mysql --protocol=TCP -h '${database_endpoint}' -u "$db_user" '${database_name}' <<'SQL'
-CREATE TABLE IF NOT EXISTS posts (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  title VARCHAR(200) NOT NULL,
-  author VARCHAR(60) NOT NULL,
-  content TEXT NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-SQL
-
-APP_ROOT=/var/lib/tomcat9/webapps/ROOT
-rm -rf /var/lib/tomcat9/webapps/app
-rm -rf "$APP_ROOT"
-install -d -m 0755 "$APP_ROOT"
-cat > "$APP_ROOT/index.jsp" <<'JSP'
-<%@ page import="java.sql.*" %><%@ page contentType="text/html; charset=UTF-8" %>
-<%!
-  Connection db() throws Exception { Class.forName("org.mariadb.jdbc.Driver"); return DriverManager.getConnection(System.getenv("BOARD_DB_URL"), System.getenv("BOARD_DB_USER"), System.getenv("BOARD_DB_PASSWORD")); }
-  String esc(String value) { if (value == null) return ""; return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;"); }
-%>
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Infra Notes</title><style>
-:root{color-scheme:dark;--bg:#07111f;--panel:#0e1d31;--soft:#112843;--line:#214365;--accent:#5de0ff;--text:#eff9ff;--muted:#9db4c8}*{box-sizing:border-box}body{margin:0;padding:28px 18px 70px;background:radial-gradient(circle at 12% 8%,#15558c 0,transparent 34%),#07111f;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}main{width:min(920px,100%);margin:auto}.hero{margin:22px 0 28px}.eyebrow{color:var(--accent);font-size:.75rem;font-weight:850;letter-spacing:.13em;text-transform:uppercase}h1{margin:10px 0;font-size:clamp(2.4rem,7vw,5rem);letter-spacing:-.07em;line-height:.95;text-wrap:balance}p{color:var(--muted);line-height:1.7;text-wrap:pretty}.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px}.card{padding:25px;border-radius:24px;background:#0e1d31e8;box-shadow:0 24px 65px #0008,inset 0 1px #ffffff10}.post{padding:20px;border-radius:16px;background:var(--soft);box-shadow:inset 0 1px #ffffff0d}.post+ .post{margin-top:12px}.post h2{margin:0;font-size:1.18rem}.meta{margin-top:8px;color:var(--muted);font-size:.8rem;font-variant-numeric:tabular-nums}.body{white-space:pre-wrap}.field{display:grid;gap:7px;margin-top:13px}.field label{color:var(--muted);font-size:.78rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase}input,textarea{width:100%;border:0;border-radius:12px;padding:13px;background:#07111f;color:var(--text);font:inherit;outline:1px solid #214365;transition-property:outline-color,box-shadow;transition-duration:150ms}input:focus,textarea:focus{outline-color:var(--accent);box-shadow:0 0 0 3px #5de0ff20}textarea{min-height:145px;resize:vertical}button{min-height:44px;margin-top:16px;padding:0 17px;border:0;border-radius:13px;background:var(--accent);color:#03121e;font:inherit;font-weight:850;cursor:pointer;transition-property:transform,box-shadow;transition-duration:160ms;transition-timing-function:cubic-bezier(.2,0,0,1);box-shadow:0 10px 24px #30c9ef4d}button:hover{transform:translateY(-2px);box-shadow:0 14px 30px #30c9ef66}button:active{transform:scale(.96)}.empty{color:var(--muted);padding:30px 0;text-align:center}@media(max-width:760px){.layout{grid-template-columns:1fr}.card{padding:20px}}
-</style></head><body><main><header class="hero"><span class="eyebrow">ALB · Nginx · Tomcat · RDS</span><h1>Infrastructure notes.</h1><p>A minimal board backed by private RDS MySQL. Requests are served by either Tomcat node behind the Nginx proxy tier.</p></header><section class="layout"><div class="card"><% boolean hasPosts=false; try(Connection c=db(); Statement s=c.createStatement(); ResultSet r=s.executeQuery("SELECT id,title,author,content,created_at FROM posts ORDER BY id DESC")){while(r.next()){hasPosts=true;%><article class="post"><h2><%=esc(r.getString("title"))%></h2><div class="meta"><%=esc(r.getString("author"))%> · <%=r.getTimestamp("created_at")%></div><p class="body"><%=esc(r.getString("content"))%></p></article><%}}catch(Exception error){response.setStatus(500);%><p class="empty">The board could not reach its database.</p><%}if(!hasPosts){%><p class="empty">No notes yet. Add the first one.</p><%}%></div><aside class="card"><span class="eyebrow">New note</span><form method="post" action="create.jsp"><div class="field"><label for="title">Title</label><input id="title" name="title" maxlength="200" required></div><div class="field"><label for="author">Author</label><input id="author" name="author" maxlength="60" required></div><div class="field"><label for="content">Message</label><textarea id="content" name="content" maxlength="5000" required></textarea></div><button type="submit">Publish note</button></form></aside></section></main></body></html>
-JSP
-
-cat > "$APP_ROOT/create.jsp" <<'JSP'
-<%@ page import="java.sql.*" %><%@ page contentType="text/html; charset=UTF-8" %>
-<%!
-  Connection db() throws Exception { Class.forName("org.mariadb.jdbc.Driver"); return DriverManager.getConnection(System.getenv("BOARD_DB_URL"), System.getenv("BOARD_DB_USER"), System.getenv("BOARD_DB_PASSWORD")); }
-  String clean(String value) { return value == null ? "" : value.trim(); }
-%>
-<% request.setCharacterEncoding("UTF-8"); if(!"POST".equals(request.getMethod())){response.sendError(405);return;} String title=clean(request.getParameter("title")),author=clean(request.getParameter("author")),content=clean(request.getParameter("content")); if(title.isEmpty()||author.isEmpty()||content.isEmpty()||title.length()>200||author.length()>60||content.length()>5000){response.sendError(400,"Invalid post input.");return;} try(Connection c=db();PreparedStatement s=c.prepareStatement("INSERT INTO posts(title,author,content) VALUES(?,?,?)")){s.setString(1,title);s.setString(2,author);s.setString(3,content);s.executeUpdate();}response.sendRedirect("index.jsp"); %>
-JSP
-
-cat > "$APP_ROOT/health.jsp" <<'JSP'
-<%@ page import="java.sql.*" %><%@ page contentType="text/plain; charset=UTF-8" %>
-<% try { Class.forName("org.mariadb.jdbc.Driver"); try(Connection c=DriverManager.getConnection(System.getenv("BOARD_DB_URL"),System.getenv("BOARD_DB_USER"),System.getenv("BOARD_DB_PASSWORD")); Statement s=c.createStatement()){s.execute("SELECT 1");out.print("database=connected");} } catch(Exception error) { response.setStatus(503);out.print("database=unavailable"); } %>
-JSP
-
-chown -R tomcat:tomcat "$APP_ROOT"
 systemctl daemon-reload
 systemctl enable tomcat9
 systemctl restart tomcat9
+
+for attempt in {1..30}; do
+  status="$(curl --silent --output /dev/null --write-out '%%{http_code}' http://127.0.0.1:8080/app/ || true)"
+  [[ "$status" != "404" && "$status" != "000" ]] && break
+  sleep 5
+done
+echo "Local Tomcat /app/ status: $${status:-unknown}"
