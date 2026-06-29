@@ -42,9 +42,265 @@ XML
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
   }
 %>
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Infra Notes</title><style>
-:root{color-scheme:dark;--bg:#07111f;--panel:#0e1d31;--soft:#112843;--line:#214365;--accent:#5de0ff;--text:#eff9ff;--muted:#9db4c8}*{box-sizing:border-box}body{margin:0;padding:28px 18px 70px;background:radial-gradient(circle at 12% 8%,#15558c 0,transparent 34%),#07111f;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}main{width:min(920px,100%);margin:auto}.hero{margin:22px 0 28px}.eyebrow{color:var(--accent);font-size:.75rem;font-weight:850;letter-spacing:.13em;text-transform:uppercase}h1{margin:10px 0;font-size:clamp(2.4rem,7vw,5rem);letter-spacing:-.07em;line-height:.95;text-wrap:balance}p{color:var(--muted);line-height:1.7;text-wrap:pretty}.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px}.card{padding:25px;border-radius:24px;background:#0e1d31e8;box-shadow:0 24px 65px #0008,inset 0 1px #ffffff10}.post{padding:20px;border-radius:16px;background:var(--soft);box-shadow:inset 0 1px #ffffff0d}.post+ .post{margin-top:12px}.post h2{margin:0;font-size:1.18rem}.meta{margin-top:8px;color:var(--muted);font-size:.8rem;font-variant-numeric:tabular-nums}.body{white-space:pre-wrap}.field{display:grid;gap:7px;margin-top:13px}.field label{color:var(--muted);font-size:.78rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase}input,textarea{width:100%;border:0;border-radius:12px;padding:13px;background:#07111f;color:var(--text);font:inherit;outline:1px solid #214365;transition-property:outline-color,box-shadow;transition-duration:150ms}input:focus,textarea:focus{outline-color:var(--accent);box-shadow:0 0 0 3px #5de0ff20}textarea{min-height:145px;resize:vertical}button{min-height:44px;margin-top:16px;padding:0 17px;border:0;border-radius:13px;background:var(--accent);color:#03121e;font:inherit;font-weight:850;cursor:pointer;transition-property:transform,box-shadow;transition-duration:160ms;transition-timing-function:cubic-bezier(.2,0,0,1);box-shadow:0 10px 24px #30c9ef4d}button:hover{transform:translateY(-2px);box-shadow:0 14px 30px #30c9ef66}button:active{transform:scale(.96)}.empty{color:var(--muted);padding:30px 0;text-align:center}.error{border:1px solid #ff718655;background:#2b1019;color:#fff1f3}@media(max-width:760px){.layout{grid-template-columns:1fr}.card{padding:20px}}
-</style></head><body><main><header class="hero"><span class="eyebrow">ALB · Nginx · Tomcat · RDS</span><h1>Infrastructure notes.</h1><p>A minimal board backed by private RDS MySQL. Requests are served by either Tomcat node behind the Nginx proxy tier.</p></header><section class="layout"><div class="card"><% boolean hasPosts=false; try(Connection c=db()){ensureSchema(c); try(Statement s=c.createStatement(); ResultSet r=s.executeQuery("SELECT id,title,author,content,created_at FROM posts ORDER BY id DESC")){while(r.next()){hasPosts=true;%><article class="post"><h2><%=esc(r.getString("title"))%></h2><div class="meta"><%=esc(r.getString("author"))%> · <%=r.getTimestamp("created_at")%></div><p class="body"><%=esc(r.getString("content"))%></p></article><%}}}catch(Exception error){response.setStatus(500);%><p class="empty error">The board is deployed, but the database connection is not ready yet.</p><%}if(response.getStatus()<500&&!hasPosts){%><p class="empty">No notes yet. Add the first one.</p><%}%></div><aside class="card"><span class="eyebrow">New note</span><form method="post" action="/app/create.jsp"><div class="field"><label for="title">Title</label><input id="title" name="title" maxlength="200" required></div><div class="field"><label for="author">Author</label><input id="author" name="author" maxlength="60" required></div><div class="field"><label for="content">Message</label><textarea id="content" name="content" maxlength="5000" required></textarea></div><button type="submit">Publish note</button></form></aside></section></main></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AR0NICA | Board</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='35' stroke='%23a78bfa' stroke-width='10' fill='none'/%3E%3Cline x1='20' y1='80' x2='80' y2='20' stroke='%23a78bfa' stroke-width='10' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-color: #080312;
+      --panel-bg: rgba(17, 12, 31, 0.78);
+      --card-bg: rgba(24, 16, 43, 0.72);
+      --card-border: rgba(167, 139, 250, 0.22);
+      --accent-color: #a78bfa;
+      --accent-strong: #c4b5fd;
+      --accent-soft: rgba(167, 139, 250, 0.12);
+      --text-main: #faf5ff;
+      --text-dim: #c4b5fd;
+      --text-muted: #9ca3af;
+      --danger-bg: rgba(248, 113, 113, 0.12);
+      --danger-border: rgba(248, 113, 113, 0.32);
+      --danger-text: #fecaca;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 42px 20px;
+      font-family: Inter, sans-serif;
+      background:
+        linear-gradient(rgba(167, 139, 250, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(167, 139, 250, 0.035) 1px, transparent 1px),
+        radial-gradient(circle at 18% 12%, rgba(124, 58, 237, 0.22), transparent 34%),
+        radial-gradient(circle at 86% 20%, rgba(192, 132, 252, 0.14), transparent 30%),
+        var(--bg-color);
+      background-size: 36px 36px, 36px 36px, auto, auto, auto;
+      color: var(--text-main);
+    }
+    .shell {
+      width: min(1120px, 100%);
+      margin: 0 auto;
+    }
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 14px;
+      border: 1px solid var(--card-border);
+      border-radius: 99px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-color);
+      box-shadow: 0 0 12px var(--accent-color);
+    }
+    h1 {
+      margin: 18px 0 10px;
+      font-size: clamp(2rem, 5vw, 3.35rem);
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+    .intro {
+      max-width: 620px;
+      margin: 0;
+      color: var(--text-muted);
+      line-height: 1.7;
+      font-size: 0.98rem;
+    }
+    .stack-label {
+      color: var(--text-dim);
+      font-family: Consolas, "Liberation Mono", monospace;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 18px;
+      align-items: start;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 22px;
+      box-shadow: 0 24px 50px -20px rgba(0, 0, 0, 0.75);
+      overflow: hidden;
+      backdrop-filter: blur(14px);
+    }
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 18px 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .post-list {
+      padding: 16px;
+    }
+    .post {
+      padding: 18px 18px 16px;
+      border: 1px solid rgba(167, 139, 250, 0.16);
+      border-radius: 16px;
+      background: var(--card-bg);
+    }
+    .post + .post { margin-top: 12px; }
+    .post h2 {
+      margin: 0;
+      font-size: 1.08rem;
+      letter-spacing: -0.01em;
+    }
+    .meta {
+      margin-top: 8px;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .body {
+      margin: 14px 0 0;
+      color: #e9d5ff;
+      line-height: 1.65;
+      white-space: pre-wrap;
+    }
+    .empty {
+      margin: 0;
+      padding: 34px 18px;
+      color: var(--text-muted);
+      text-align: center;
+    }
+    .error {
+      margin: 16px;
+      border: 1px solid var(--danger-border);
+      border-radius: 16px;
+      background: var(--danger-bg);
+      color: var(--danger-text);
+    }
+    form {
+      padding: 18px;
+    }
+    .field {
+      display: grid;
+      gap: 7px;
+      margin-bottom: 14px;
+    }
+    label {
+      color: var(--text-dim);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid rgba(167, 139, 250, 0.18);
+      border-radius: 12px;
+      padding: 12px 13px;
+      background: rgba(8, 3, 18, 0.76);
+      color: var(--text-main);
+      font: inherit;
+      outline: none;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--accent-color);
+      box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.16);
+    }
+    textarea {
+      min-height: 150px;
+      resize: vertical;
+    }
+    button {
+      width: 100%;
+      min-height: 44px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent-color);
+      color: #130722;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+    }
+    @media (max-width: 820px) {
+      body { padding: 28px 16px; }
+      .hero { display: block; }
+      .stack-label { display: block; margin-top: 16px; }
+      .layout { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <span class="badge"><span class="dot"></span>Board Online</span>
+        <h1>Infrastructure Board</h1>
+        <p class="intro">A simple RDS-backed message board served through ALB, Nginx, and private Tomcat.</p>
+      </div>
+      <div class="stack-label">ALB / NGINX / TOMCAT / RDS</div>
+    </header>
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-title"><span>Recent Notes</span><span>MySQL Storage</span></div>
+        <div class="post-list">
+          <% boolean hasPosts=false; try(Connection c=db()){ensureSchema(c); try(Statement s=c.createStatement(); ResultSet r=s.executeQuery("SELECT id,title,author,content,created_at FROM posts ORDER BY id DESC")){while(r.next()){hasPosts=true;%>
+          <article class="post">
+            <h2><%=esc(r.getString("title"))%></h2>
+            <div class="meta"><%=esc(r.getString("author"))%> · <%=r.getTimestamp("created_at")%></div>
+            <p class="body"><%=esc(r.getString("content"))%></p>
+          </article>
+          <%}}}catch(Exception error){response.setStatus(500);%>
+          <p class="empty error">The board is deployed, but the database connection is not ready yet.</p>
+          <%}if(response.getStatus()<500&&!hasPosts){%>
+          <p class="empty">No notes yet. Add the first one.</p>
+          <%}%>
+        </div>
+      </div>
+      <aside class="panel">
+        <div class="panel-title"><span>New Note</span><span>Publish</span></div>
+        <form method="post" action="/app/create.jsp">
+          <div class="field">
+            <label for="title">Title</label>
+            <input id="title" name="title" maxlength="200" required>
+          </div>
+          <div class="field">
+            <label for="author">Author</label>
+            <input id="author" name="author" maxlength="60" required>
+          </div>
+          <div class="field">
+            <label for="content">Message</label>
+            <textarea id="content" name="content" maxlength="5000" required></textarea>
+          </div>
+          <button type="submit">Publish note</button>
+        </form>
+      </aside>
+    </section>
+  </main>
+</body>
+</html>
 JSP
 
   cat > "$app_root/create.jsp" <<'JSP'
@@ -83,7 +339,7 @@ if [[ -n "$secret" && "$secret" != "None" ]]; then
   install -d -m 0755 /etc/systemd/system/tomcat9.service.d
   {
     printf '[Service]\n'
-    printf 'Environment="BOARD_DB_URL=jdbc:mariadb://${database_endpoint}:3306/${database_name}"\n'
+    printf 'Environment="BOARD_DB_URL=jdbc:mariadb://${database_endpoint}:3306/${database_name}?useSsl=true&trustServerCertificate=true&allowPublicKeyRetrieval=true&connectTimeout=10000&socketTimeout=30000"\n'
     printf 'Environment="BOARD_DB_USER=%s"\n' "$(printf '%s' "$db_user" | escape_systemd)"
     printf 'Environment="BOARD_DB_PASSWORD=%s"\n' "$(printf '%s' "$db_password" | escape_systemd)"
   } > /etc/systemd/system/tomcat9.service.d/board.conf
