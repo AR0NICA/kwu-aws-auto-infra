@@ -94,6 +94,9 @@ resource "aws_route_table_association" "database" {
 }
 
 output "vpc_id" { value = aws_vpc.this.id }
+output "vpc_cidr" { value = var.vpc_cidr }
+output "public_route_table_id" { value = aws_route_table.public.id }
+output "private_route_table_id" { value = aws_route_table.private.id }
 output "bastion_subnet_id" { value = aws_subnet.public["bastion"].id }
 output "nginx_subnet_ids" { value = { for key, subnet in aws_subnet.public : key => subnet.id if startswith(key, "nginx_") } }
 output "tomcat_subnet_ids" { value = { for key, subnet in aws_subnet.tomcat : key => subnet.id } }

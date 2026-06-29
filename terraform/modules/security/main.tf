@@ -1,6 +1,10 @@
 variable "name_prefix" { type = string }
 variable "vpc_id" { type = string }
 variable "admin_cidr" { type = string }
+variable "peer_cidr_blocks" {
+  type    = list(string)
+  default = []
+}
 
 locals {
   groups = {
@@ -97,6 +101,40 @@ resource "aws_vpc_security_group_ingress_rule" "database_mysql" {
   to_port                      = 3306
   ip_protocol                  = "tcp"
   description                  = "MySQL from Tomcat"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "peer_icmp" {
+  for_each = {
+    for pair in setproduct(["bastion", "nginx", "tomcat"], var.peer_cidr_blocks) :
+    "${pair[0]}-${replace(pair[1], "/", "-")}" => {
+      group = pair[0]
+      cidr  = pair[1]
+    }
+  }
+
+  security_group_id = aws_security_group.this[each.value.group].id
+  cidr_ipv4         = each.value.cidr
+  ip_protocol       = "icmp"
+  from_port         = -1
+  to_port           = -1
+  description       = "ICMP from peered training VPC"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "peer_ssh" {
+  for_each = {
+    for pair in setproduct(["bastion", "nginx", "tomcat"], var.peer_cidr_blocks) :
+    "${pair[0]}-${replace(pair[1], "/", "-")}" => {
+      group = pair[0]
+      cidr  = pair[1]
+    }
+  }
+
+  security_group_id = aws_security_group.this[each.value.group].id
+  cidr_ipv4         = each.value.cidr
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
+  description       = "SSH from peered training VPC"
 }
 
 output "bastion_security_group_id" { value = aws_security_group.this["bastion"].id }

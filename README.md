@@ -1,22 +1,26 @@
 # AWS Auto Infra
 
-A CloudShell-first Terraform project that deploys a secure training 3-tier application in `ap-northeast-2`.
+A CloudShell-first Terraform project that deploys a secure training 3-tier application in `ap-northeast-2` and a peered development VPC in `us-east-1`.
 
 ```text
 Internet → Route 53 → ALB (HTTPS) → Nginx (2A / 2C) → Tomcat (2A / 2C) → private RDS MySQL
                                            ▲
 Admin network → Bastion ───────────────────┘
+
+KWU-PRD-VPC 10.250.0.0/16 ⇄ VPC Peering ⇄ KWU-DEV-VPC 10.230.0.0/16
 ```
 
 ![3-tier infrastructure architecture](assets/3-tier-arch.png)
 
-The project uses two Availability Zones for Nginx and Tomcat, one NAT Gateway and a single-AZ RDS instance to keep a lab deployment affordable. The ALB is the only public application endpoint. Nginx, Tomcat, and RDS are not directly reachable from the internet.
+The project uses two Availability Zones for the production Nginx and Tomcat tiers, one production NAT Gateway, and a single-AZ RDS instance to keep a lab deployment affordable. The ALB is the only public production application endpoint. Nginx, Tomcat, and RDS are not directly reachable from the internet. The development VPC is created in Northern Virginia as a separate training network and connected to production through inter-region VPC Peering.
 
 ## What is automated
 
 - Terraform installation in CloudShell when it is missing, including release checksum verification.
 - Per-account S3 Terraform state backend with versioning, SSE-S3 encryption, public-access blocking, and state locking.
-- VPC, public/private subnets, IGW, NAT Gateway, route tables, security groups, Bastion, Nginx, Tomcat, private RDS MySQL, and ALB.
+- Production VPC, public/private subnets, IGW, NAT Gateway, route tables, security groups, Bastion, Nginx, Tomcat, private RDS MySQL, and ALB.
+- Development VPC in `us-east-1`, public/private subnets, IGW, NAT Gateway, security groups, Nginx/Tomcat/DB EC2 lab nodes, and inter-region VPC Peering.
+- Bidirectional private routes between `10.250.0.0/16` and `10.230.0.0/16`, plus ICMP/SSH rules for peering connectivity tests.
 - ACM certificate request, Route 53 DNS validation, HTTP-to-HTTPS redirect, and Route 53 alias records for the apex and `www` domains.
 - An RDS-backed JSP board with input validation, parameterized SQL, escaped output, and a database health endpoint.
 - English progress logs under `outputs/` and an English interactive menu.
@@ -25,7 +29,7 @@ The project uses two Availability Zones for Nginx and Tomcat, one NAT Gateway an
 
 - AWS CloudShell with AWS CLI credentials for `ap-northeast-2`.
 - A public Route 53 hosted zone already delegated to the apex domain you enter, such as `example.com`. If `www.example.com` is entered, the TUI automatically uses `example.com`.
-- An existing EC2 key pair in `ap-northeast-2`.
+- An existing EC2 key pair with the same name in both `ap-northeast-2` and `us-east-1`. EC2 key pairs are regional, and the TUI validates both regions before applying.
 - IAM permission to create the listed VPC, EC2, IAM, ELBv2, RDS, ACM, Route 53, Secrets Manager, and S3 resources. The first run must also be able to configure the generated S3 state bucket.
 
 No ACM certificate, RDS password, Terraform installation, or state bucket is required beforehand.
@@ -46,7 +50,7 @@ The menu accepts the following actions:
 3. **Test ALB and application connectivity** — enter the domain. The script verifies two healthy ALB targets and retries the HTTPS database-health endpoint.
 4. **Exit** — makes no AWS changes.
 
-The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, and the board health URL. Open `https://<your-domain>/app/` to use the board. Nginx exposes `/app/` publicly and strips that prefix before proxying to the private Tomcat ROOT application. The same JSP board is also deployed to the Tomcat `/app` context as a fallback, so prefix-stripped and non-stripped proxy paths both resolve instead of returning a Tomcat 404.
+The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, DEV Nginx public IP, DEV private node IPs, VPC Peering connection ID, and the board health URL. Open `https://<your-domain>/app/` to use the board. Nginx exposes `/app/` publicly and strips that prefix before proxying to the private Tomcat ROOT application. The same JSP board is also deployed to the Tomcat `/app` context as a fallback, so prefix-stripped and non-stripped proxy paths both resolve instead of returning a Tomcat 404.
 
 After a successful create, the script exits immediately instead of waiting for application health checks. DNS, ALB target health, and Tomcat startup can settle independently; start the script again and use menu option 3 when you want to run the explicit connectivity test.
 
@@ -58,6 +62,8 @@ After a successful create, the script exits immediately instead of waiting for a
 | Nginx | HTTP 80 from the ALB; SSH 22 from Bastion |
 | Tomcat | TCP 8080 from Nginx; SSH 22 from Bastion |
 | RDS | MySQL 3306 from Tomcat only |
+| DEV Nginx | HTTP/HTTPS from the internet for lab visibility; SSH from the administrator CIDR; ICMP/SSH from PRD over peering |
+| DEV Tomcat/DB | Private only; ICMP/SSH from PRD over peering; tier-specific DEV traffic |
 
 Nginx 2A renders a blue operational landing page and Nginx 2C renders a red one. Refreshing the root domain can therefore show ALB traffic moving between the two healthy edge nodes.
 
@@ -82,7 +88,7 @@ Delete uses Terraform state only; it never searches by broad tags or deletes unr
 
 ## Costs and lifecycle
 
-This project creates billable resources: a NAT Gateway, ALB, five EC2 instances, RDS MySQL, and a small S3 state backend. The current lab defaults are one NAT Gateway, single-AZ RDS, no RDS backups, and no final RDS snapshot. Use menu option 2 when the lab is no longer required.
+This project creates billable resources: two NAT Gateways, an ALB, eight EC2 instances, RDS MySQL, inter-region VPC Peering data transfer when used, and a small S3 state backend. The current lab defaults are one NAT Gateway per VPC, single-AZ RDS, no RDS backups, and no final RDS snapshot. Use menu option 2 when the lab is no longer required.
 
 ## Repository structure
 
@@ -96,6 +102,8 @@ terraform/
   modules/compute/        # EC2, IAM role, Nginx, Tomcat board templates
   modules/load_balancer/  # ALB, target group, HTTP/HTTPS listeners
   modules/dns/            # Route 53 lookup and ACM DNS validation
+  modules/dev_environment/# us-east-1 DEV VPC, EC2 lab nodes, and routing
+  modules/peering/        # inter-region VPC Peering and bidirectional routes
 outputs/                  # ignored runtime logs
 .auto-infra/              # ignored generated runtime configuration
 ```

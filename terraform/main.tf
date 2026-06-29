@@ -1,5 +1,6 @@
 locals {
-  project_name = "kwu-prd-vpc"
+  project_name     = "kwu-prd-vpc"
+  dev_project_name = "kwu-dev-vpc"
   common_tags = {
     Project     = "aws-auto-infra"
     ManagedBy   = "Terraform"
@@ -36,6 +37,9 @@ module "security" {
   name_prefix = local.project_name
   vpc_id      = module.network.vpc_id
   admin_cidr  = var.admin_cidr
+  peer_cidr_blocks = [
+    module.dev_environment.vpc_cidr
+  ]
 }
 
 module "dns" {
@@ -77,6 +81,42 @@ module "load_balancer" {
   security_group_id = module.security.alb_security_group_id
   nginx_instances   = module.compute.nginx_instances
   certificate_arn   = module.dns.certificate_arn
+}
+
+module "dev_environment" {
+  source = "./modules/dev_environment"
+  providers = {
+    aws = aws.use1
+  }
+
+  name_prefix = local.dev_project_name
+  vpc_cidr    = "10.230.0.0/16"
+  key_name    = var.key_name
+  admin_cidr  = var.admin_cidr
+  prd_cidr    = module.network.vpc_cidr
+}
+
+module "peering" {
+  source = "./modules/peering"
+  providers = {
+    aws     = aws
+    aws.dev = aws.use1
+  }
+
+  name_prefix = "kwu-prd-dev"
+  prd_vpc_id  = module.network.vpc_id
+  prd_cidr    = module.network.vpc_cidr
+  prd_route_table_ids = [
+    module.network.public_route_table_id,
+    module.network.private_route_table_id
+  ]
+  dev_vpc_id = module.dev_environment.vpc_id
+  dev_cidr   = module.dev_environment.vpc_cidr
+  dev_region = var.dev_region
+  dev_route_table_ids = [
+    module.dev_environment.public_route_table_id,
+    module.dev_environment.private_route_table_id
+  ]
 }
 
 resource "aws_route53_record" "website" {

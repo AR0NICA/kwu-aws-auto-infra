@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 readonly PROJECT_NAME="aws-auto-infra"
 readonly AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-northeast-2}}"
+readonly DEV_REGION="${AUTO_INFRA_DEV_REGION:-us-east-1}"
 readonly TF_DIR="$ROOT_DIR/terraform"
 readonly RUNTIME_DIR="$ROOT_DIR/.auto-infra"
 readonly OUTPUT_DIR="$ROOT_DIR/outputs"
@@ -11,6 +12,8 @@ readonly TERRAFORM_VERSION="1.15.6"
 TERRAFORM_BIN="${TERRAFORM_BIN:-$HOME/bin/terraform}"
 readonly VPC_NAME="KWU-PRD-VPC"
 readonly VPC_CIDR="10.250.0.0/16"
+readonly DEV_VPC_NAME="KWU-DEV-VPC"
+readonly DEV_VPC_CIDR="10.230.0.0/16"
 
 LOG_FILE=""
 ACCOUNT_ID=""
@@ -193,9 +196,11 @@ route53_zone_id() {
 }
 
 verify_prerequisites() {
-  local found_key zone_id
+  local found_key dev_found_key zone_id
   found_key="$(aws ec2 describe-key-pairs --key-names "$KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
   [[ "$found_key" == "$KEY_NAME" ]] || { fail "EC2 key pair was not found in $AWS_REGION: $KEY_NAME"; return 1; }
+  dev_found_key="$(aws ec2 describe-key-pairs --region "$DEV_REGION" --key-names "$KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
+  [[ "$dev_found_key" == "$KEY_NAME" ]] || { fail "EC2 key pair was not found in $DEV_REGION: $KEY_NAME. EC2 key pairs are regional, so create or import the same key name there before running."; return 1; }
   zone_id="$(route53_zone_id)" || return 1
   [[ -n "$zone_id" && "$zone_id" != 'None' ]] || { fail "No exact public Route 53 hosted zone exists for $DOMAIN_NAME."; return 1; }
 }
@@ -212,9 +217,11 @@ assert_records_unused() {
 }
 
 assert_no_legacy_stack() {
-  local existing
+  local existing dev_existing
   existing="$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=$VPC_NAME" "Name=cidr-block,Values=$VPC_CIDR" --query 'Vpcs[].VpcId' --output text)"
   [[ -z "$existing" || "$existing" == 'None' ]] || { fail "An unmanaged legacy VPC already uses $VPC_CIDR: $existing. Delete or import it before creation."; return 1; }
+  dev_existing="$(aws ec2 describe-vpcs --region "$DEV_REGION" --filters "Name=tag:Name,Values=$DEV_VPC_NAME" "Name=cidr-block,Values=$DEV_VPC_CIDR" --query 'Vpcs[].VpcId' --output text)"
+  [[ -z "$dev_existing" || "$dev_existing" == 'None' ]] || { fail "An unmanaged legacy DEV VPC already uses $DEV_VPC_CIDR in $DEV_REGION: $dev_existing. Delete or import it before creation."; return 1; }
 }
 
 write_variables() {
@@ -222,6 +229,7 @@ write_variables() {
   cat > "$RUNTIME_DIR/terraform.tfvars.json" <<EOF
 {
   "aws_region": "$AWS_REGION",
+  "dev_region": "$DEV_REGION",
   "domain_name": "$DOMAIN_NAME",
   "key_name": "$KEY_NAME",
   "admin_cidr": "$ADMIN_CIDR"

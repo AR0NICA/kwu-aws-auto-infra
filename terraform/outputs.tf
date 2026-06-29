@@ -5,3 +5,6 @@ output "alb_dns_name" { value = module.load_balancer.dns_name }
 output "alb_target_group_arn" { value = module.load_balancer.target_group_arn }
 output "bastion_public_ip" { value = module.compute.bastion_public_ip }
 output "rds_endpoint" { value = module.database.endpoint }
+output "dev_nginx_public_ip" { value = module.dev_environment.nginx_public_ip }
+output "dev_private_ips" { value = module.dev_environment.private_ips }
+output "vpc_peering_connection_id" { value = module.peering.peering_connection_id }
