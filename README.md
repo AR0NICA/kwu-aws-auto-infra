@@ -29,7 +29,7 @@ The project uses two Availability Zones for the production Nginx and Tomcat tier
 
 - AWS CloudShell with AWS CLI credentials for `ap-northeast-2`.
 - A public Route 53 hosted zone already delegated to the apex domain you enter, such as `example.com`. If `www.example.com` is entered, the TUI automatically uses `example.com`.
-- An existing EC2 key pair with the same name in both `ap-northeast-2` and `us-east-1`. EC2 key pairs are regional, and the TUI validates both regions before applying.
+- Existing EC2 key pairs in both `ap-northeast-2` and `us-east-1`. EC2 key pairs are regional, so the TUI asks for the Seoul PRD key pair name and the Virginia DEV key pair name separately.
 - IAM permission to create the listed VPC, EC2, IAM, ELBv2, RDS, ACM, Route 53, Secrets Manager, and S3 resources. The first run must also be able to configure the generated S3 state bucket.
 
 No ACM certificate, RDS password, Terraform installation, or state bucket is required beforehand.
@@ -45,14 +45,15 @@ chmod +x auto_infra.sh scripts/lib.sh
 
 The menu accepts the following actions:
 
-1. **Create infrastructure** — enter the Route 53 domain and EC2 key-pair name. The script validates both before Terraform applies the stack.
-2. **Delete all infrastructure** — enter the same domain and key-pair name, then confirm. RDS is deleted without a final snapshot.
+1. **Create infrastructure** — enter the Route 53 domain, Seoul PRD EC2 key-pair name, and Virginia DEV EC2 key-pair name. The script validates both regions before Terraform applies the stack.
+2. **Delete all infrastructure** — enter the same domain and key-pair names, then confirm. RDS is deleted without a final snapshot.
 3. **Test ALB and application connectivity** — enter the domain. The script verifies two healthy ALB targets and retries the HTTPS database-health endpoint.
-4. **Exit** — makes no AWS changes.
+4. **Test VPC Peering connectivity** — enter the domain. The script verifies that the PCX is active and that both PRD and DEV route tables contain the expected peering routes.
+5. **Exit** — makes no AWS changes.
 
 The successful create output includes the HTTPS URLs, ALB DNS name, Bastion public IP, private RDS endpoint, DEV Nginx public IP, DEV private node IPs, VPC Peering connection ID, and the board health URL. Open `https://<your-domain>/app/` to use the board. Nginx exposes `/app/` publicly and strips that prefix before proxying to the private Tomcat ROOT application. The same JSP board is also deployed to the Tomcat `/app` context as a fallback, so prefix-stripped and non-stripped proxy paths both resolve instead of returning a Tomcat 404.
 
-After a successful create, the script exits immediately instead of waiting for application health checks. DNS, ALB target health, and Tomcat startup can settle independently; start the script again and use menu option 3 when you want to run the explicit connectivity test.
+After a successful create, the script exits immediately instead of waiting for application health checks. DNS, ALB target health, Tomcat startup, and PCX propagation can settle independently; start the script again and use menu option 3 or 4 when you want to run explicit connectivity tests.
 
 ## Security model
 

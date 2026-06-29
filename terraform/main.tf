@@ -91,7 +91,7 @@ module "dev_environment" {
 
   name_prefix = local.dev_project_name
   vpc_cidr    = "10.230.0.0/16"
-  key_name    = var.key_name
+  key_name    = var.dev_key_name
   admin_cidr  = var.admin_cidr
   prd_cidr    = module.network.vpc_cidr
 }

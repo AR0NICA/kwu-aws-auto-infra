@@ -8,6 +8,7 @@ readonly DEV_REGION="${AUTO_INFRA_DEV_REGION:-us-east-1}"
 readonly TF_DIR="$ROOT_DIR/terraform"
 readonly RUNTIME_DIR="$ROOT_DIR/.auto-infra"
 readonly OUTPUT_DIR="$ROOT_DIR/outputs"
+readonly LOGO_FILE="$ROOT_DIR/assets/auto-infra-logo.txt"
 readonly TERRAFORM_VERSION="1.15.6"
 TERRAFORM_BIN="${TERRAFORM_BIN:-$HOME/bin/terraform}"
 readonly VPC_NAME="KWU-PRD-VPC"
@@ -20,6 +21,7 @@ ACCOUNT_ID=""
 BACKEND_BUCKET=""
 DOMAIN_NAME=""
 KEY_NAME=""
+DEV_KEY_NAME=""
 ADMIN_CIDR=""
 
 init_log() {
@@ -48,6 +50,10 @@ fail() {
 
 banner() {
   printf '\n============================================================\n'
+  if [[ -f "$LOGO_FILE" ]]; then
+    cat "$LOGO_FILE"
+    printf '\n'
+  fi
   printf '                 AWS AUTO INFRA - TERRAFORM\n'
   printf '============================================================\n'
 }
@@ -90,16 +96,21 @@ prompt_domain() {
 }
 
 prompt_key_name() {
-  local input
+  local target="$1" prompt="$2" input
   while true; do
-    read -r -p 'Enter the existing EC2 key pair name: ' input || return 1
+    read -r -p "$prompt" input || return 1
     input="${input%$'\r'}"
-    KEY_NAME="$input"
-    if validate_key_name "$KEY_NAME"; then
+    if validate_key_name "$input"; then
+      printf -v "$target" '%s' "$input"
       return 0
     fi
     say ERROR 'The key pair name may contain only letters, numbers, dots, underscores, and hyphens.'
   done
+}
+
+prompt_key_names() {
+  prompt_key_name KEY_NAME "Enter the existing EC2 key pair name for Seoul PRD ($AWS_REGION): " || return 1
+  prompt_key_name DEV_KEY_NAME "Enter the existing EC2 key pair name for Virginia DEV ($DEV_REGION): " || return 1
 }
 
 state_key() {
@@ -199,8 +210,8 @@ verify_prerequisites() {
   local found_key dev_found_key zone_id
   found_key="$(aws ec2 describe-key-pairs --key-names "$KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
   [[ "$found_key" == "$KEY_NAME" ]] || { fail "EC2 key pair was not found in $AWS_REGION: $KEY_NAME"; return 1; }
-  dev_found_key="$(aws ec2 describe-key-pairs --region "$DEV_REGION" --key-names "$KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
-  [[ "$dev_found_key" == "$KEY_NAME" ]] || { fail "EC2 key pair was not found in $DEV_REGION: $KEY_NAME. EC2 key pairs are regional, so create or import the same key name there before running."; return 1; }
+  dev_found_key="$(aws ec2 describe-key-pairs --region "$DEV_REGION" --key-names "$DEV_KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
+  [[ "$dev_found_key" == "$DEV_KEY_NAME" ]] || { fail "EC2 key pair was not found in $DEV_REGION: $DEV_KEY_NAME"; return 1; }
   zone_id="$(route53_zone_id)" || return 1
   [[ -n "$zone_id" && "$zone_id" != 'None' ]] || { fail "No exact public Route 53 hosted zone exists for $DOMAIN_NAME."; return 1; }
 }
@@ -232,6 +243,7 @@ write_variables() {
   "dev_region": "$DEV_REGION",
   "domain_name": "$DOMAIN_NAME",
   "key_name": "$KEY_NAME",
+  "dev_key_name": "$DEV_KEY_NAME",
   "admin_cidr": "$ADMIN_CIDR"
 }
 EOF
@@ -246,7 +258,7 @@ terraform_state_exists() {
 create_infrastructure() {
   banner
   prompt_domain || return 0
-  prompt_key_name || return 0
+  prompt_key_names || return 0
   initialize_terraform || return 1
   verify_prerequisites || return 1
   local state_entries
@@ -287,7 +299,7 @@ delete_empty_backend_bucket() {
 delete_infrastructure() {
   banner
   prompt_domain || return 0
-  prompt_key_name || return 0
+  prompt_key_names || return 0
   read -r -p "Destroy all Terraform-managed infrastructure for $DOMAIN_NAME? [y/N]: " answer
   answer="${answer%$'\r'}"
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { say INFO 'Deletion cancelled.'; return 0; }
@@ -337,26 +349,58 @@ test_application() {
   say OK 'ALB targets are healthy and the Tomcat board is connected to RDS.'
 }
 
+test_peering() {
+  local pcx_id status prd_routes dev_routes dev_ips dev_nginx_ip dev_tomcat_ip dev_db_ip
+  banner
+  prompt_domain || return 0
+  initialize_terraform || return 1
+
+  pcx_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw vpc_peering_connection_id 2>/dev/null)" || { fail 'No Terraform-managed VPC Peering connection exists for this domain.'; return 1; }
+  [[ -n "$pcx_id" ]] || { fail 'No Terraform-managed VPC Peering connection exists for this domain.'; return 1; }
+
+  status="$(aws ec2 describe-vpc-peering-connections --vpc-peering-connection-ids "$pcx_id" --query 'VpcPeeringConnections[0].Status.Code' --output text 2>/dev/null || true)"
+  [[ "$status" == "active" ]] || { fail "VPC Peering connection is not active. Current status: ${status:-unknown}"; return 1; }
+  say OK "VPC Peering connection is active: $pcx_id"
+
+  prd_routes="$(aws ec2 describe-route-tables --filters "Name=route.vpc-peering-connection-id,Values=$pcx_id" "Name=route.destination-cidr-block,Values=$DEV_VPC_CIDR" --query 'length(RouteTables[])' --output text)"
+  [[ "$prd_routes" -ge 2 ]] || { fail "PRD route tables do not both contain $DEV_VPC_CIDR -> $pcx_id routes."; return 1; }
+  say OK "PRD route tables contain $DEV_VPC_CIDR peering routes."
+
+  dev_routes="$(aws ec2 describe-route-tables --region "$DEV_REGION" --filters "Name=route.vpc-peering-connection-id,Values=$pcx_id" "Name=route.destination-cidr-block,Values=$VPC_CIDR" --query 'length(RouteTables[])' --output text)"
+  [[ "$dev_routes" -ge 2 ]] || { fail "DEV route tables do not both contain $VPC_CIDR -> $pcx_id routes."; return 1; }
+  say OK "DEV route tables contain $VPC_CIDR peering routes."
+
+  dev_ips="$($TERRAFORM_BIN -chdir="$TF_DIR" output -json dev_private_ips 2>/dev/null)" || { fail 'No Terraform-managed DEV private IP outputs exist.'; return 1; }
+  dev_nginx_ip="$(jq -r '.nginx // empty' <<<"$dev_ips")"
+  dev_tomcat_ip="$(jq -r '.tomcat // empty' <<<"$dev_ips")"
+  dev_db_ip="$(jq -r '.db // empty' <<<"$dev_ips")"
+  [[ -n "$dev_nginx_ip" && -n "$dev_tomcat_ip" && -n "$dev_db_ip" ]] || { fail 'DEV private IP outputs are incomplete.'; return 1; }
+  say OK "DEV private targets are known: Nginx=$dev_nginx_ip, Tomcat=$dev_tomcat_ip, DB=$dev_db_ip"
+  say OK 'PCX control-plane test passed. Private packet tests can be run from Bastion/DEV instances with ping or SSH.'
+}
+
 draw_menu() {
   banner
   printf '1) Create infrastructure\n'
   printf '2) Delete all infrastructure\n'
   printf '3) Test ALB and application connectivity\n'
-  printf '4) Exit\n\n'
+  printf '4) Test VPC Peering connectivity\n'
+  printf '5) Exit\n\n'
 }
 
 main() {
   init_log
   while true; do
     draw_menu
-    read -r -p 'Select an option [1-4]: ' choice || choice=4
+    read -r -p 'Select an option [1-5]: ' choice || choice=5
     choice="${choice%$'\r'}"
     case "$choice" in
       1) if create_infrastructure; then say INFO 'Creation completed. Exiting.'; return 0; else say ERROR 'Creation failed. No further deployment steps were run.'; fi ;;
       2) if ! delete_infrastructure; then say ERROR 'Deletion failed. Check the log before retrying.'; fi ;;
       3) if ! test_application true; then say ERROR 'Connectivity test failed.'; fi ;;
-      4) say INFO 'Exiting.'; return 0 ;;
-      *) say ERROR 'Invalid selection. Enter a number from 1 to 4.' ;;
+      4) if ! test_peering; then say ERROR 'VPC Peering connectivity test failed.'; fi ;;
+      5) say INFO 'Exiting.'; return 0 ;;
+      *) say ERROR 'Invalid selection. Enter a number from 1 to 5.' ;;
     esac
     printf '\nPress Enter to continue...'
     read -r _ || true
