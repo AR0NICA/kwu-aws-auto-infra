@@ -15,14 +15,12 @@ readonly VPC_NAME="KWU-PRD-VPC"
 readonly VPC_CIDR="10.250.0.0/16"
 readonly DEV_VPC_NAME="KWU-DEV-VPC"
 readonly DEV_VPC_CIDR="10.230.0.0/16"
+readonly VPN_TEST_CIDR="172.31.240.0/24"
 
 LOG_FILE=""
 ACCOUNT_ID=""
 BACKEND_BUCKET=""
 DOMAIN_NAME=""
-KEY_NAME=""
-DEV_KEY_NAME=""
-ADMIN_CIDR=""
 
 init_log() {
   mkdir -p "$OUTPUT_DIR" "$RUNTIME_DIR"
@@ -73,10 +71,6 @@ normalize_domain() {
   printf '%s\n' "${domain%.}"
 }
 
-validate_key_name() {
-  [[ "$1" =~ ^[A-Za-z0-9._-]{1,255}$ ]]
-}
-
 prompt_domain() {
   local input requested_domain
   while true; do
@@ -93,24 +87,6 @@ prompt_domain() {
     fi
     say ERROR 'Enter a valid apex domain, for example: example.com'
   done
-}
-
-prompt_key_name() {
-  local target="$1" prompt="$2" input
-  while true; do
-    read -r -p "$prompt" input || return 1
-    input="${input%$'\r'}"
-    if validate_key_name "$input"; then
-      printf -v "$target" '%s' "$input"
-      return 0
-    fi
-    say ERROR 'The key pair name may contain only letters, numbers, dots, underscores, and hyphens.'
-  done
-}
-
-prompt_key_names() {
-  prompt_key_name KEY_NAME "Enter the existing EC2 key pair name for Seoul PRD ($AWS_REGION): " || return 1
-  prompt_key_name DEV_KEY_NAME "Enter the existing EC2 key pair name for Virginia DEV ($DEV_REGION): " || return 1
 }
 
 state_key() {
@@ -153,6 +129,8 @@ ensure_terraform() {
 configure_aws() {
   require_command aws || return 1
   require_command jq || return 1
+  [[ "$AWS_REGION" == 'ap-northeast-2' ]] || { fail "This topology requires AWS_REGION=ap-northeast-2 because its PRD availability zones are fixed in Seoul. Current value: $AWS_REGION"; return 1; }
+  [[ "$DEV_REGION" == 'us-east-1' ]] || { fail "This topology requires AUTO_INFRA_DEV_REGION=us-east-1 for the Virginia DEV/on-premises VPC. Current value: $DEV_REGION"; return 1; }
   export AWS_PAGER=""
   export AWS_DEFAULT_REGION="$AWS_REGION"
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)" || { fail 'AWS credentials are not valid.'; return 1; }
@@ -190,30 +168,81 @@ initialize_terraform() {
     -backend-config='use_lockfile=true' | tee -a "$LOG_FILE" || return 1
 }
 
-detect_admin_cidr() {
-  if [[ -n "${AUTO_INFRA_ADMIN_CIDR:-}" ]]; then
-    ADMIN_CIDR="$AUTO_INFRA_ADMIN_CIDR"
-  else
-    local address
-    address="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')" || { fail 'Unable to determine the CloudShell public IP. Set AUTO_INFRA_ADMIN_CIDR and retry.'; return 1; }
-    [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { fail 'The public IP service returned an invalid IPv4 address.'; return 1; }
-    ADMIN_CIDR="$address/32"
-  fi
-}
-
 route53_zone_id() {
   aws route53 list-hosted-zones-by-name --dns-name "$DOMAIN_NAME." \
     --query "HostedZones[?Name=='$DOMAIN_NAME.' && Config.PrivateZone==\`false\`].Id | [0]" --output text | sed 's#^/hostedzone/##'
 }
 
 verify_prerequisites() {
-  local found_key dev_found_key zone_id
-  found_key="$(aws ec2 describe-key-pairs --key-names "$KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
-  [[ "$found_key" == "$KEY_NAME" ]] || { fail "EC2 key pair was not found in $AWS_REGION: $KEY_NAME"; return 1; }
-  dev_found_key="$(aws ec2 describe-key-pairs --region "$DEV_REGION" --key-names "$DEV_KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)"
-  [[ "$dev_found_key" == "$DEV_KEY_NAME" ]] || { fail "EC2 key pair was not found in $DEV_REGION: $DEV_KEY_NAME"; return 1; }
+  local zone_id
   zone_id="$(route53_zone_id)" || return 1
   [[ -n "$zone_id" && "$zone_id" != 'None' ]] || { fail "No exact public Route 53 hosted zone exists for $DOMAIN_NAME."; return 1; }
+}
+
+assert_security_services_unused() {
+  local state_entries="$1"
+  local region prefix detector_address recorder_address channel_address hub_address session_document_address
+  local detector_count recorder_count channel_count hub_arn hub_error_file document_count trail_count aggregator_arn
+  local prd_hub_managed=false
+  for region in "$AWS_REGION" "$DEV_REGION"; do
+    if [[ "$region" == "$AWS_REGION" ]]; then
+      prefix='prd'
+    else
+      prefix='dev'
+    fi
+    detector_address="module.${prefix}_threat_detection.aws_guardduty_detector.this"
+    recorder_address="module.${prefix}_config.aws_config_configuration_recorder.this"
+    channel_address="module.${prefix}_config.aws_config_delivery_channel.this"
+    hub_address="module.${prefix}_threat_detection.aws_securityhub_account.this"
+    session_document_address="module.${prefix}_session_manager.aws_ssm_document.session_preferences"
+
+    if ! grep -Fqx "$detector_address" <<<"$state_entries"; then
+      detector_count="$(aws guardduty list-detectors --region "$region" --query 'length(DetectorIds)' --output text)" || { fail "Unable to inspect GuardDuty in $region."; return 1; }
+      [[ "${detector_count:-0}" == "0" ]] || { fail "GuardDuty is already enabled in $region. Import that detector before deployment."; return 1; }
+    fi
+
+    if ! grep -Fqx "$recorder_address" <<<"$state_entries"; then
+      recorder_count="$(aws configservice describe-configuration-recorders --region "$region" --query 'length(ConfigurationRecorders)' --output text)" || { fail "Unable to inspect AWS Config recorders in $region."; return 1; }
+      [[ "${recorder_count:-0}" == "0" ]] || { fail "A customer-managed AWS Config recorder already exists in $region. Import it before deployment."; return 1; }
+    fi
+
+    if ! grep -Fqx "$channel_address" <<<"$state_entries"; then
+      channel_count="$(aws configservice describe-delivery-channels --region "$region" --query 'length(DeliveryChannels)' --output text)" || { fail "Unable to inspect AWS Config delivery channels in $region."; return 1; }
+      [[ "${channel_count:-0}" == "0" ]] || { fail "An AWS Config delivery channel already exists in $region. Import it before deployment."; return 1; }
+    fi
+
+    if ! grep -Fqx "$hub_address" <<<"$state_entries"; then
+      hub_error_file="$(mktemp)" || return 1
+      if ! hub_arn="$(aws securityhub describe-hub --region "$region" --query 'HubArn' --output text 2>"$hub_error_file")"; then
+        if ! grep -Eq '\((InvalidAccessException|ResourceNotFoundException)\)' "$hub_error_file"; then
+          fail "Unable to inspect Security Hub in $region."
+          sed 's/^/  /' "$hub_error_file" >&2
+          rm -f "$hub_error_file"
+          return 1
+        fi
+        hub_arn=''
+      fi
+      rm -f "$hub_error_file"
+      [[ -z "$hub_arn" || "$hub_arn" == "None" ]] || { fail "Security Hub is already enabled in $region. Import the existing hub before deployment."; return 1; }
+    elif [[ "$prefix" == 'prd' ]]; then
+      prd_hub_managed=true
+    fi
+
+    if ! grep -Fqx "$session_document_address" <<<"$state_entries"; then
+      document_count="$(aws ssm list-documents --region "$region" --filters 'Key=Owner,Values=Self' 'Key=Name,Values=SSM-SessionManagerRunShell' --query 'length(DocumentIdentifiers)' --output text)" || { fail "Unable to inspect Session Manager preferences in $region."; return 1; }
+      [[ "${document_count:-0}" == '0' ]] || { fail "Account-level Session Manager preferences already exist in $region. Import the SSM-SessionManagerRunShell document before deployment."; return 1; }
+    fi
+  done
+
+  if ! grep -Fqx 'module.audit.aws_cloudtrail.this' <<<"$state_entries"; then
+    trail_count="$(aws cloudtrail describe-trails --trail-name-list 'kwu-prd-vpc-audit' --no-include-shadow-trails --query 'length(trailList)' --output text)" || { fail 'Unable to inspect existing CloudTrail trails.'; return 1; }
+    [[ "${trail_count:-0}" == "0" ]] || { fail 'The CloudTrail trail kwu-prd-vpc-audit already exists. Import it before deployment.'; return 1; }
+  fi
+
+  if ! grep -Fqx 'module.prd_threat_detection.aws_securityhub_finding_aggregator.this[0]' <<<"$state_entries" && [[ "$prd_hub_managed" == true ]]; then
+    aggregator_arn="$(aws securityhub list-finding-aggregators --region "$AWS_REGION" --query 'FindingAggregators[0].FindingAggregatorArn' --output text)" || { fail 'Unable to inspect Security Hub finding aggregators.'; return 1; }
+    [[ -z "$aggregator_arn" || "$aggregator_arn" == "None" ]] || { fail 'A Security Hub finding aggregator already exists. Import it before deployment.'; return 1; }
+  fi
 }
 
 assert_records_unused() {
@@ -236,15 +265,11 @@ assert_no_legacy_stack() {
 }
 
 write_variables() {
-  detect_admin_cidr || return 1
   cat > "$RUNTIME_DIR/terraform.tfvars.json" <<EOF
 {
   "aws_region": "$AWS_REGION",
   "dev_region": "$DEV_REGION",
-  "domain_name": "$DOMAIN_NAME",
-  "key_name": "$KEY_NAME",
-  "dev_key_name": "$DEV_KEY_NAME",
-  "admin_cidr": "$ADMIN_CIDR"
+  "domain_name": "$DOMAIN_NAME"
 }
 EOF
 }
@@ -259,7 +284,6 @@ create_infrastructure() {
   local plan_file
   banner
   prompt_domain || return 0
-  prompt_key_names || return 0
   initialize_terraform || return 1
   verify_prerequisites || return 1
   local state_entries
@@ -274,15 +298,16 @@ create_infrastructure() {
   else
     say INFO 'Existing Terraform state found. Applying the managed deployment update.'
   fi
+  assert_security_services_unused "$state_entries" || return 1
   write_variables || return 1
   plan_file="$RUNTIME_DIR/create.tfplan"
   rm -f "$plan_file"
   say INFO 'Preparing a Terraform execution plan.'
   "$TERRAFORM_BIN" -chdir="$TF_DIR" plan -input=false -out="$plan_file" -var-file="$RUNTIME_DIR/terraform.tfvars.json" | tee -a "$LOG_FILE" || { rm -f "$plan_file"; return 1; }
-  say INFO 'Creating infrastructure from the saved Terraform plan. RDS, NAT Gateway, ACM validation, and PCX activation can take several minutes.'
+  say INFO 'Creating infrastructure from the saved Terraform plan. Multi-AZ RDS, NAT Gateways, ACM validation, security services, PCX, and VPN activation can take several minutes.'
   "$TERRAFORM_BIN" -chdir="$TF_DIR" apply -input=false "$plan_file" | tee -a "$LOG_FILE" || { rm -f "$plan_file"; return 1; }
   rm -f "$plan_file"
-  say OK 'Deployment completed. Run menu option 3 in a new session to verify ALB and database connectivity.'
+  say OK 'Deployment completed. Run menu options 3, 4, and 5 in a new session to verify the application, PCX, and VPN.'
 }
 
 delete_state_versions() {
@@ -305,8 +330,8 @@ delete_empty_backend_bucket() {
 delete_infrastructure() {
   banner
   prompt_domain || return 0
-  prompt_key_names || return 0
-  read -r -p "Destroy all Terraform-managed infrastructure for $DOMAIN_NAME? [y/N]: " answer
+  say WARN 'Deletion also removes project-managed GuardDuty findings, Config history, Flow Logs, WAF logs, and CloudTrail audit objects.'
+  read -r -p "Destroy all Terraform-managed infrastructure and audit data for $DOMAIN_NAME? [y/N]: " answer
   answer="${answer%$'\r'}"
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { say INFO 'Deletion cancelled.'; return 0; }
   initialize_terraform || return 1
@@ -355,8 +380,84 @@ test_application() {
   say OK 'ALB targets are healthy and the Tomcat board is connected to RDS.'
 }
 
+ssm_run_shell() {
+  local instance_id="$1" region="$2" command="$3" description="$4"
+  local command_id status stdout stderr parameters attempt
+
+  parameters="$(jq -cn --arg command "$command" '{commands:[$command]}')" || return 1
+  command_id="$(aws ssm send-command \
+    --region "$region" \
+    --instance-ids "$instance_id" \
+    --document-name 'AWS-RunShellScript' \
+    --comment "$description" \
+    --parameters "$parameters" \
+    --query 'Command.CommandId' \
+    --output text 2>/dev/null)" || { fail "Unable to send an SSM command to $instance_id in $region."; return 1; }
+
+  status='Pending'
+  for attempt in {1..60}; do
+    status="$(aws ssm get-command-invocation --region "$region" --command-id "$command_id" --instance-id "$instance_id" --query 'Status' --output text 2>/dev/null || true)"
+    case "$status" in
+      Success|Cancelled|Failed|TimedOut|Cancelling) break ;;
+      *) sleep 5 ;;
+    esac
+  done
+  status="$(aws ssm get-command-invocation --region "$region" --command-id "$command_id" --instance-id "$instance_id" --query 'Status' --output text 2>/dev/null || true)"
+  stdout="$(aws ssm get-command-invocation --region "$region" --command-id "$command_id" --instance-id "$instance_id" --query 'StandardOutputContent' --output text 2>/dev/null || true)"
+  stderr="$(aws ssm get-command-invocation --region "$region" --command-id "$command_id" --instance-id "$instance_id" --query 'StandardErrorContent' --output text 2>/dev/null || true)"
+
+  if [[ "$status" != "Success" ]]; then
+    fail "SSM command failed on $instance_id. Status: ${status:-unknown}"
+    [[ -z "$stdout" || "$stdout" == "None" ]] || printf '%s\n' "$stdout"
+    [[ -z "$stderr" || "$stderr" == "None" ]] || printf '%s\n' "$stderr" >&2
+    return 1
+  fi
+
+  [[ -z "$stdout" || "$stdout" == "None" ]] || printf '%s\n' "$stdout"
+}
+
+managed_instance_online() {
+  local instance_id="$1" region="$2" status attempt
+  for attempt in {1..30}; do
+    status="$(aws ssm describe-instance-information \
+      --region "$region" \
+      --filters "Key=InstanceIds,Values=$instance_id" \
+      --query 'InstanceInformationList[0].PingStatus' \
+      --output text 2>/dev/null || true)"
+    [[ "$status" == "Online" ]] && return 0
+    sleep 10
+  done
+  return 1
+}
+
+ensure_session_manager_plugin() {
+  command -v session-manager-plugin >/dev/null 2>&1 && return 0
+
+  local architecture package_arch package_url
+  architecture="$(uname -m)"
+  case "$architecture" in
+    x86_64) package_arch='linux_64bit' ;;
+    aarch64|arm64) package_arch='linux_arm64' ;;
+    *) fail "Unsupported CloudShell CPU architecture for the Session Manager plugin: $architecture"; return 1 ;;
+  esac
+
+  require_command sudo || return 1
+  package_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/${package_arch}/session-manager-plugin.rpm"
+  say INFO 'Session Manager plugin was not found. Installing the AWS-signed package.'
+  if command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y "$package_url" >/dev/null || return 1
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y "$package_url" >/dev/null || return 1
+  else
+    fail 'Neither dnf nor yum is available to install the Session Manager plugin.'
+    return 1
+  fi
+  command -v session-manager-plugin >/dev/null 2>&1 || { fail 'Session Manager plugin installation did not place the executable on PATH.'; return 1; }
+  say OK "Installed Session Manager plugin: $(session-manager-plugin --version 2>/dev/null || printf 'version unavailable')"
+}
+
 test_peering() {
-  local pcx_id status prd_routes dev_routes dev_ips dev_nginx_ip dev_tomcat_ip dev_db_ip
+  local pcx_id status prd_routes dev_routes dev_ips dev_nginx_ip dev_tomcat_ip dev_db_ip management_instance_id target
   banner
   prompt_domain || return 0
   initialize_terraform || return 1
@@ -382,7 +483,69 @@ test_peering() {
   dev_db_ip="$(jq -r '.db // empty' <<<"$dev_ips")"
   [[ -n "$dev_nginx_ip" && -n "$dev_tomcat_ip" && -n "$dev_db_ip" ]] || { fail 'DEV private IP outputs are incomplete.'; return 1; }
   say OK "DEV private targets are known: Nginx=$dev_nginx_ip, Tomcat=$dev_tomcat_ip, DB=$dev_db_ip"
-  say OK 'PCX control-plane test passed. Private packet tests can be run from Bastion/DEV instances with ping or SSH.'
+
+  management_instance_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw management_instance_id 2>/dev/null)" || { fail 'No Terraform-managed SSM management instance exists.'; return 1; }
+  managed_instance_online "$management_instance_id" "$AWS_REGION" || { fail "SSM management instance is not online: $management_instance_id"; return 1; }
+  for target in "$dev_nginx_ip" "$dev_tomcat_ip" "$dev_db_ip"; do
+    say INFO "Testing a private ICMP packet path from $management_instance_id to $target over PCX."
+    ssm_run_shell "$management_instance_id" "$AWS_REGION" "ping -c 3 -W 3 '$target'" "PCX packet test to $target" || return 1
+  done
+  say OK 'PCX control-plane routes and private packet paths are working.'
+}
+
+test_vpn() {
+  local vpn_id vpn_statuses vpn_test_ip vpn_test_instance_id management_instance_id management_private_ip strongswan_instance_id strongswan_eni vgw_id prd_route_count dev_route_count attempt
+  banner
+  prompt_domain || return 0
+  initialize_terraform || return 1
+
+  vpn_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw vpn_connection_id 2>/dev/null)" || { fail 'No Terraform-managed Site-to-Site VPN connection exists for this domain.'; return 1; }
+  vpn_test_ip="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw vpn_test_ip 2>/dev/null)" || { fail 'No Terraform-managed StrongSwan test address exists.'; return 1; }
+  vpn_test_instance_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw vpn_test_instance_id 2>/dev/null)" || { fail 'No Terraform-managed DEV VPN test node exists.'; return 1; }
+  management_instance_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw management_instance_id 2>/dev/null)" || { fail 'No Terraform-managed SSM management instance exists.'; return 1; }
+  management_private_ip="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw management_private_ip 2>/dev/null)" || { fail 'No Terraform-managed PRD management address exists.'; return 1; }
+  strongswan_instance_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw strongswan_instance_id 2>/dev/null)" || { fail 'No Terraform-managed StrongSwan instance exists.'; return 1; }
+  strongswan_eni="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw strongswan_network_interface_id 2>/dev/null)" || { fail 'No Terraform-managed StrongSwan network interface exists.'; return 1; }
+  vgw_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw virtual_private_gateway_id 2>/dev/null)" || { fail 'No Terraform-managed virtual private gateway exists.'; return 1; }
+
+  vpn_statuses=""
+  for attempt in {1..90}; do
+    vpn_statuses="$(aws ec2 describe-vpn-connections --region "$AWS_REGION" --vpn-connection-ids "$vpn_id" --query 'VpnConnections[0].VgwTelemetry[].Status' --output text 2>/dev/null || true)"
+    [[ "$vpn_statuses" == *UP* ]] && break
+    sleep 10
+  done
+  [[ "$vpn_statuses" == *UP* ]] || { fail "Neither AWS VPN tunnel is UP. Current statuses: ${vpn_statuses:-unknown}"; return 1; }
+  say OK "At least one AWS VPN tunnel is UP: $vpn_id ($vpn_statuses)"
+
+  prd_route_count="$(aws ec2 describe-route-tables --region "$AWS_REGION" --filters "Name=route.gateway-id,Values=$vgw_id" "Name=route.destination-cidr-block,Values=$VPN_TEST_CIDR" --query 'length(RouteTables)' --output text 2>/dev/null || true)"
+  [[ "${prd_route_count:-0}" -ge 1 ]] || { fail "No PRD route sends $VPN_TEST_CIDR to $vgw_id."; return 1; }
+  dev_route_count="$(aws ec2 describe-route-tables --region "$DEV_REGION" --filters "Name=route.network-interface-id,Values=$strongswan_eni" "Name=route.destination-cidr-block,Values=10.250.2.0/24" --query 'length(RouteTables)' --output text 2>/dev/null || true)"
+  [[ "${dev_route_count:-0}" -ge 1 ]] || { fail "No DEV return route sends 10.250.2.0/24 to $strongswan_eni."; return 1; }
+  say OK 'The dedicated forward and return routes target the VPN gateways.'
+
+  managed_instance_online "$strongswan_instance_id" "$DEV_REGION" || { fail "StrongSwan is not online in SSM: $strongswan_instance_id"; return 1; }
+  ssm_run_shell "$strongswan_instance_id" "$DEV_REGION" "ipsec statusall | grep -q ESTABLISHED && ip -brief link show | grep -E 'Tunnel1|Tunnel2'" 'StrongSwan tunnel status test' || return 1
+
+  managed_instance_online "$management_instance_id" "$AWS_REGION" || { fail "SSM management instance is not online: $management_instance_id"; return 1; }
+  say INFO "Testing encrypted ICMP traffic to StrongSwan address $vpn_test_ip in $VPN_TEST_CIDR."
+  ssm_run_shell "$management_instance_id" "$AWS_REGION" "ping -c 5 -W 3 '$vpn_test_ip'" 'StrongSwan VPN packet test' || return 1
+  managed_instance_online "$vpn_test_instance_id" "$DEV_REGION" || { fail "DEV VPN test node is not online in SSM: $vpn_test_instance_id"; return 1; }
+  say INFO "Testing the encrypted return path from $vpn_test_ip to PRD management address $management_private_ip."
+  ssm_run_shell "$vpn_test_instance_id" "$DEV_REGION" "ping -c 5 -W 3 '$management_private_ip'" 'StrongSwan VPN return-path test' || return 1
+  say OK 'Both directions of the AWS Site-to-Site VPN and StrongSwan packet path are working.'
+}
+
+start_management_session() {
+  local management_instance_id
+  banner
+  prompt_domain || return 0
+  initialize_terraform || return 1
+  ensure_session_manager_plugin || return 1
+
+  management_instance_id="$($TERRAFORM_BIN -chdir="$TF_DIR" output -raw management_instance_id 2>/dev/null)" || { fail 'No Terraform-managed SSM management instance exists.'; return 1; }
+  managed_instance_online "$management_instance_id" "$AWS_REGION" || { fail "SSM management instance is not online: $management_instance_id"; return 1; }
+  say INFO "Starting an audited Session Manager shell on $management_instance_id. Type exit to return to the menu."
+  aws ssm start-session --region "$AWS_REGION" --target "$management_instance_id"
 }
 
 draw_menu() {
@@ -391,22 +554,26 @@ draw_menu() {
   printf '2) Delete all infrastructure\n'
   printf '3) Test ALB and application connectivity\n'
   printf '4) Test VPC Peering connectivity\n'
-  printf '5) Exit\n\n'
+  printf '5) Test StrongSwan VPN connectivity\n'
+  printf '6) Start SSM management session\n'
+  printf '7) Exit\n\n'
 }
 
 main() {
   init_log
   while true; do
     draw_menu
-    read -r -p 'Select an option [1-5]: ' choice || choice=5
+    read -r -p 'Select an option [1-7]: ' choice || choice=7
     choice="${choice%$'\r'}"
     case "$choice" in
       1) if create_infrastructure; then say INFO 'Creation completed. Exiting.'; return 0; else say ERROR 'Creation failed. No further deployment steps were run.'; fi ;;
       2) if ! delete_infrastructure; then say ERROR 'Deletion failed. Check the log before retrying.'; fi ;;
       3) if ! test_application true; then say ERROR 'Connectivity test failed.'; fi ;;
       4) if ! test_peering; then say ERROR 'VPC Peering connectivity test failed.'; fi ;;
-      5) say INFO 'Exiting.'; return 0 ;;
-      *) say ERROR 'Invalid selection. Enter a number from 1 to 5.' ;;
+      5) if ! test_vpn; then say ERROR 'StrongSwan VPN connectivity test failed.'; fi ;;
+      6) if ! start_management_session; then say ERROR 'Unable to start the SSM management session.'; fi ;;
+      7) say INFO 'Exiting.'; return 0 ;;
+      *) say ERROR 'Invalid selection. Enter a number from 1 to 7.' ;;
     esac
     printf '\nPress Enter to continue...'
     read -r _ || true

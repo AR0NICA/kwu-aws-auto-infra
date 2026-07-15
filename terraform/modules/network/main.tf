@@ -11,6 +11,13 @@ resource "aws_vpc" "this" {
   tags                 = { Name = "KWU-PRD-VPC" }
 }
 
+# Adopt the VPC's default security group and remove its default rules. All
+# workload traffic is granted through dedicated security groups instead.
+resource "aws_default_security_group" "this" {
+  vpc_id = aws_vpc.this.id
+  tags   = { Name = "KWU-PRD-VPC-DEFAULT-SG-CLOSED" }
+}
+
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
   tags   = { Name = "KWU-PRD-VPC-IGW" }
@@ -97,7 +104,14 @@ output "vpc_id" { value = aws_vpc.this.id }
 output "vpc_cidr" { value = var.vpc_cidr }
 output "public_route_table_id" { value = aws_route_table.public.id }
 output "private_route_table_id" { value = aws_route_table.private.id }
-output "bastion_subnet_id" { value = aws_subnet.public["bastion"].id }
+output "route_table_ids" {
+  value = {
+    public  = aws_route_table.public.id
+    private = aws_route_table.private.id
+  }
+}
+output "management_subnet_id" { value = aws_subnet.tomcat["tomcat_2a"].id }
+output "endpoint_subnet_ids" { value = { for key, subnet in aws_subnet.tomcat : key => subnet.id } }
 output "nginx_subnet_ids" { value = { for key, subnet in aws_subnet.public : key => subnet.id if startswith(key, "nginx_") } }
 output "tomcat_subnet_ids" { value = { for key, subnet in aws_subnet.tomcat : key => subnet.id } }
 output "database_subnet_ids" { value = { for key, subnet in aws_subnet.database : key => subnet.id } }

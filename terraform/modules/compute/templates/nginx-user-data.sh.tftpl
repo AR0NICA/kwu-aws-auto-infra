@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || snap start amazon-ssm-agent
+
 apt-get update
 apt-get install -y nginx
 

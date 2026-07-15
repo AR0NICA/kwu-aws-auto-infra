@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+readonly EXPECTED_PUBLIC_IP='${expected_public_ip}'
+readonly PRD_REGION='${prd_region}'
+readonly PRD_TEST_CIDR='${prd_test_cidr}'
+readonly DEV_TEST_CIDR='${dev_test_cidr}'
+readonly VPN_SECRET_ARN='${vpn_secret_arn}'
+readonly TUNNEL1_OUTSIDE_IP='${tunnel1.outside_ip}'
+readonly TUNNEL1_CGW_INSIDE_IP='${tunnel1.cgw_inside_ip}'
+readonly TUNNEL1_VGW_INSIDE_IP='${tunnel1.vgw_inside_ip}'
+readonly TUNNEL2_OUTSIDE_IP='${tunnel2.outside_ip}'
+readonly TUNNEL2_CGW_INSIDE_IP='${tunnel2.cgw_inside_ip}'
+readonly TUNNEL2_VGW_INSIDE_IP='${tunnel2.vgw_inside_ip}'
+
+retry() {
+  local attempts="$1"
+  shift
+  local count=1
+  until "$@"; do
+    (( count >= attempts )) && return 1
+    sleep 5
+    (( count += 1 ))
+  done
+}
+
+retry 60 apt-get update
+retry 20 apt-get install -y strongswan strongswan-pki awscli jq iptables-persistent
+
+systemctl disable --now strongswan-starter >/dev/null 2>&1 || true
+install -m 0750 /dev/null /usr/local/sbin/aws-vti-updown
+printf '%s' '${updown_script_b64}' | base64 --decode > /usr/local/sbin/aws-vti-updown
+chmod 0750 /usr/local/sbin/aws-vti-updown
+
+cat > /etc/sysctl.d/90-aws-vpn-router.conf <<'SYSCTL'
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+SYSCTL
+sysctl --system >/dev/null
+
+cat > /etc/ipsec.conf <<IPSEC
+config setup
+  charondebug="ike 1, knl 1, cfg 1"
+  uniqueids=no
+  strictcrlpolicy=no
+
+conn %default
+  type=tunnel
+  keyexchange=ikev2
+  authby=psk
+  left=%defaultroute
+  leftid=$EXPECTED_PUBLIC_IP
+  leftsubnet=$DEV_TEST_CIDR
+  rightsubnet=$PRD_TEST_CIDR
+  aggressive=no
+  ikelifetime=28800s
+  lifetime=3600s
+  margintime=270s
+  rekey=yes
+  reauth=no
+  rekeyfuzz=100%
+  fragmentation=yes
+  replay_window=1024
+  dpddelay=30s
+  dpdtimeout=120s
+  dpdaction=restart
+  keyingtries=%forever
+  forceencaps=yes
+  mobike=no
+  ike=aes256-sha256-modp2048!
+  esp=aes256-sha256-modp2048!
+  auto=start
+
+conn Tunnel1
+  right=$TUNNEL1_OUTSIDE_IP
+  rightid=$TUNNEL1_OUTSIDE_IP
+  mark=${tunnel1.mark}
+  leftupdown="/usr/local/sbin/aws-vti-updown --link-name Tunnel1 --local-inside $TUNNEL1_CGW_INSIDE_IP --remote-inside $TUNNEL1_VGW_INSIDE_IP --mark ${tunnel1.mark} --metric ${tunnel1.route_metric} --remote-cidr $PRD_TEST_CIDR --local-cidr $DEV_TEST_CIDR"
+
+conn Tunnel2
+  right=$TUNNEL2_OUTSIDE_IP
+  rightid=$TUNNEL2_OUTSIDE_IP
+  mark=${tunnel2.mark}
+  leftupdown="/usr/local/sbin/aws-vti-updown --link-name Tunnel2 --local-inside $TUNNEL2_CGW_INSIDE_IP --remote-inside $TUNNEL2_VGW_INSIDE_IP --mark ${tunnel2.mark} --metric ${tunnel2.route_metric} --remote-cidr $PRD_TEST_CIDR --local-cidr $DEV_TEST_CIDR"
+IPSEC
+
+if grep -qE '^[[:space:]#]*install_routes[[:space:]]*=' /etc/strongswan.d/charon.conf; then
+  sed -i -E 's/^[[:space:]#]*install_routes[[:space:]]*=.*/    install_routes = no/' /etc/strongswan.d/charon.conf
+fi
+
+cat > /usr/local/sbin/refresh-aws-vpn-secrets <<'REFRESH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly PRD_REGION='${prd_region}'
+readonly VPN_SECRET_ARN='${vpn_secret_arn}'
+readonly EXPECTED_PUBLIC_IP='${expected_public_ip}'
+readonly TUNNEL1_OUTSIDE_IP='${tunnel1.outside_ip}'
+readonly TUNNEL2_OUTSIDE_IP='${tunnel2.outside_ip}'
+readonly HASH_FILE='/var/lib/strongswan/aws-vpn-secret.sha256'
+
+mkdir -p /var/lib/strongswan
+secret_json="$(aws secretsmanager get-secret-value \
+  --region "$PRD_REGION" \
+  --secret-id "$VPN_SECRET_ARN" \
+  --query SecretString \
+  --output text)"
+tunnel1_psk="$(jq -er --arg endpoint "$TUNNEL1_OUTSIDE_IP" '.[$endpoint] | select(type == "string" and length > 0)' <<<"$secret_json")"
+tunnel2_psk="$(jq -er --arg endpoint "$TUNNEL2_OUTSIDE_IP" '.[$endpoint] | select(type == "string" and length > 0)' <<<"$secret_json")"
+new_hash="$(printf '%s\0%s' "$tunnel1_psk" "$tunnel2_psk" | sha256sum | awk '{print $1}')"
+old_hash="$(cat "$HASH_FILE" 2>/dev/null || true)"
+
+if [[ "$new_hash" != "$old_hash" || ! -s /etc/ipsec.secrets ]]; then
+  secrets_file="$(mktemp /etc/ipsec.secrets.XXXXXX)"
+  printf '%s %s : PSK "%s"\n' "$EXPECTED_PUBLIC_IP" "$TUNNEL1_OUTSIDE_IP" "$tunnel1_psk" > "$secrets_file"
+  printf '%s %s : PSK "%s"\n' "$EXPECTED_PUBLIC_IP" "$TUNNEL2_OUTSIDE_IP" "$tunnel2_psk" >> "$secrets_file"
+  chmod 0600 "$secrets_file"
+  mv -f "$secrets_file" /etc/ipsec.secrets
+  printf '%s\n' "$new_hash" > "$HASH_FILE"
+
+  if systemctl is-active --quiet strongswan-starter; then
+    ipsec rereadsecrets
+    ipsec reload
+    ipsec down Tunnel1 >/dev/null 2>&1 || true
+    ipsec down Tunnel2 >/dev/null 2>&1 || true
+  fi
+fi
+
+if ! systemctl is-active --quiet strongswan-starter; then
+  systemctl enable --now strongswan-starter
+fi
+
+ipsec up Tunnel1 >/dev/null 2>&1 || true
+ipsec up Tunnel2 >/dev/null 2>&1 || true
+ping -c 1 -W 2 -I Tunnel1 '${tunnel1.vgw_inside_ip}' >/dev/null 2>&1 || true
+ping -c 1 -W 2 -I Tunnel2 '${tunnel2.vgw_inside_ip}' >/dev/null 2>&1 || true
+ipsec statusall | grep -q 'ESTABLISHED'
+REFRESH
+chmod 0700 /usr/local/sbin/refresh-aws-vpn-secrets
+
+cat > /etc/systemd/system/aws-vpn-refresh.service <<'UNIT'
+[Unit]
+Description=Refresh AWS Site-to-Site VPN secrets and tunnels
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/refresh-aws-vpn-secrets
+UNIT
+
+cat > /etc/systemd/system/aws-vpn-refresh.timer <<'UNIT'
+[Unit]
+Description=Periodically refresh AWS Site-to-Site VPN secrets
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now aws-vpn-refresh.timer
+systemctl start aws-vpn-refresh.service || true
+
+if command -v snap >/dev/null 2>&1 && snap list amazon-ssm-agent >/dev/null 2>&1; then
+  snap start amazon-ssm-agent >/dev/null 2>&1 || true
+else
+  systemctl enable --now amazon-ssm-agent >/dev/null 2>&1 || true
+fi

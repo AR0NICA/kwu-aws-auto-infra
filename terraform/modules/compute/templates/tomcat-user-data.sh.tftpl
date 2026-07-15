@@ -3,6 +3,8 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 exec > >(tee -a /var/log/kwu-tomcat-user-data.log) 2>&1
 
+systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || snap start amazon-ssm-agent
+
 apt-get update
 apt-get install -y openjdk-17-jdk tomcat9 libmariadb-java awscli jq curl
 ln -sf /usr/share/java/mariadb-java-client.jar /var/lib/tomcat9/lib/mariadb-java-client.jar
@@ -325,32 +327,122 @@ write_board_app /var/lib/tomcat9/webapps/ROOT
 write_board_app /var/lib/tomcat9/webapps/app
 chown -R tomcat:tomcat /var/lib/tomcat9/webapps/ROOT /var/lib/tomcat9/webapps/app
 
-secret=""
+install -d -m 0700 /var/lib/kwu-board
+install -d -m 0755 /etc/systemd/system/tomcat9.service.d
+
+cat > /usr/local/sbin/refresh-board-db-secret <<'SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly SECRET_ARN='${database_secret_arn}'
+readonly SECRET_REGION='${aws_region}'
+readonly DATABASE_ENDPOINT='${database_endpoint}'
+readonly DATABASE_NAME='${database_name}'
+readonly CONFIG_FILE='/etc/systemd/system/tomcat9.service.d/board.conf'
+readonly VERSION_FILE='/var/lib/kwu-board/secret-version'
+
+restart_service=true
+if [[ "$#" -gt 0 && "$1" == '--no-restart' ]]; then
+  restart_service=false
+fi
+
+payload=''
 for attempt in {1..60}; do
-  secret="$(aws secretsmanager get-secret-value --secret-id '${database_secret_arn}' --region '${aws_region}' --query SecretString --output text 2>/dev/null || true)"
-  [[ -n "$secret" && "$secret" != "None" ]] && break
+  payload="$(aws secretsmanager get-secret-value \
+    --secret-id "$SECRET_ARN" \
+    --region "$SECRET_REGION" \
+    --query '{version:VersionId,secret:SecretString}' \
+    --output json 2>/dev/null || true)"
+  if jq -e '.version != null and .secret != null' >/dev/null 2>&1 <<<"$payload"; then
+    break
+  fi
   sleep 10
 done
 
-if [[ -n "$secret" && "$secret" != "None" ]]; then
-  db_user="$(jq -r '.username' <<<"$secret")"
-  db_password="$(jq -r '.password' <<<"$secret")"
-  escape_systemd() { sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g'; }
-  install -d -m 0755 /etc/systemd/system/tomcat9.service.d
-  {
-    printf '[Service]\n'
-    printf 'Environment="BOARD_DB_URL=jdbc:mariadb://${database_endpoint}:3306/${database_name}?useSsl=true&trustServerCertificate=true&allowPublicKeyRetrieval=true&connectTimeout=10000&socketTimeout=30000"\n'
-    printf 'Environment="BOARD_DB_USER=%s"\n' "$(printf '%s' "$db_user" | escape_systemd)"
-    printf 'Environment="BOARD_DB_PASSWORD=%s"\n' "$(printf '%s' "$db_password" | escape_systemd)"
-  } > /etc/systemd/system/tomcat9.service.d/board.conf
-  chmod 0600 /etc/systemd/system/tomcat9.service.d/board.conf
-else
-  echo 'RDS secret was not available. The board app was deployed, but database health will fail until credentials are configured.' >&2
+if ! jq -e '.version != null and .secret != null' >/dev/null 2>&1 <<<"$payload"; then
+  echo 'Unable to retrieve the current RDS secret version.' >&2
+  exit 1
 fi
 
+version="$(jq -er '.version' <<<"$payload")"
+secret="$(jq -er '.secret' <<<"$payload")"
+if ! jq -e '(.username | type == "string" and length > 0) and (.password | type == "string" and length > 0)' >/dev/null 2>&1 <<<"$secret"; then
+  echo 'The RDS secret does not contain valid username and password fields.' >&2
+  exit 1
+fi
+
+if [[ -s "$VERSION_FILE" && -s "$CONFIG_FILE" && "$(<"$VERSION_FILE")" == "$version" ]]; then
+  exit 0
+fi
+
+db_user="$(jq -er '.username' <<<"$secret")"
+db_password="$(jq -er '.password' <<<"$secret")"
+escape_systemd() { sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g'; }
+
+tmp_config=''
+tmp_version=''
+cleanup() {
+  [[ -z "$tmp_config" ]] || rm -f "$tmp_config"
+  [[ -z "$tmp_version" ]] || rm -f "$tmp_version"
+}
+trap cleanup EXIT
+
+umask 077
+tmp_config="$(mktemp "$CONFIG_FILE.tmp.XXXXXX")"
+{
+  printf '[Service]\n'
+  printf 'Environment="BOARD_DB_URL=jdbc:mariadb://%s:3306/%s?useSsl=true&trustServerCertificate=true&allowPublicKeyRetrieval=true&connectTimeout=10000&socketTimeout=30000"\n' "$DATABASE_ENDPOINT" "$DATABASE_NAME"
+  printf 'Environment="BOARD_DB_USER=%s"\n' "$(printf '%s' "$db_user" | escape_systemd)"
+  printf 'Environment="BOARD_DB_PASSWORD=%s"\n' "$(printf '%s' "$db_password" | escape_systemd)"
+} > "$tmp_config"
+chmod 0600 "$tmp_config"
+mv -f "$tmp_config" "$CONFIG_FILE"
+tmp_config=''
+
+systemctl daemon-reload
+if [[ "$restart_service" == true ]] && systemctl is-active --quiet tomcat9; then
+  systemctl restart tomcat9
+fi
+
+tmp_version="$(mktemp "$VERSION_FILE.tmp.XXXXXX")"
+printf '%s\n' "$version" > "$tmp_version"
+chmod 0600 "$tmp_version"
+mv -f "$tmp_version" "$VERSION_FILE"
+tmp_version=''
+SCRIPT
+chmod 0750 /usr/local/sbin/refresh-board-db-secret
+
+cat > /etc/systemd/system/board-db-secret-refresh.service <<'UNIT'
+[Unit]
+Description=Refresh the board database credentials from AWS Secrets Manager
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/refresh-board-db-secret
+TimeoutStartSec=12min
+UNIT
+
+cat > /etc/systemd/system/board-db-secret-refresh.timer <<'UNIT'
+[Unit]
+Description=Check for a rotated board database secret
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=15s
+Unit=board-db-secret-refresh.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+/usr/local/sbin/refresh-board-db-secret --no-restart
 systemctl daemon-reload
 systemctl enable tomcat9
 systemctl restart tomcat9
+systemctl enable --now board-db-secret-refresh.timer
 
 for attempt in {1..30}; do
   status="$(curl --silent --output /dev/null --write-out '%%{http_code}' http://127.0.0.1:8080/app/ || true)"
