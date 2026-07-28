@@ -98,7 +98,7 @@ run "fresh_deployment_plan" {
   }
 
   assert {
-    condition     = output.vpn_test_ip == "172.31.240.10"
+    condition     = output.vpn_test_ip == "10.231.240.10"
     error_message = "The dedicated VPN test address must remain outside the PCX CIDR."
   }
 }

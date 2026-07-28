@@ -16,7 +16,7 @@ A CloudShell-first Terraform project that builds a security-focused AWS training
 Internet → Route 53 → WAF → ALB (HTTPS) → Nginx 2A/2C → Tomcat 2A/2C → Multi-AZ RDS MySQL
 
 KWU-PRD-VPC 10.250.0.0/16 ⇄ Inter-Region PCX ⇄ KWU-DEV-VPC 10.230.0.0/16
-PRD 10.250.2.0/24        ⇄ AWS Site-to-Site VPN ⇄ StrongSwan ⇄ DEV 172.31.240.0/24
+PRD 10.250.2.0/24        ⇄ AWS Site-to-Site VPN ⇄ StrongSwan ⇄ DEV 10.231.240.0/24
 ```
 
 ## Architecture
@@ -40,7 +40,7 @@ PRD 10.250.2.0/24        ⇄ AWS Site-to-Site VPN ⇄ StrongSwan ⇄ DEV 172.31.
 - Deploys two Nginx nodes, two private Tomcat nodes, a private SSM management node, a public ALB, and private Multi-AZ RDS MySQL.
 - Builds the Northern Virginia DEV VPC with Nginx, Tomcat, MariaDB, a private VPN test node, NAT egress, and a StrongSwan customer gateway.
 - Creates inter-Region VPC Peering between `10.250.0.0/16` and `10.230.0.0/16` with bidirectional private routes.
-- Creates a dedicated dual-tunnel IKEv2 VPN path between `10.250.2.0/24` and `172.31.240.0/24` without conflicting with PCX routes.
+- Creates a dedicated dual-tunnel IKEv2 VPN path between `10.250.2.0/24` and `10.231.240.0/24` without conflicting with PCX routes.
 - Requests an ACM certificate, creates Route 53 validation records, redirects HTTP to HTTPS, and creates apex and `www` alias records.
 - Deploys an RDS-backed JSP message board and exposes database health at `/app/health.jsp`.
 - Provides an English TUI and timestamped execution logs under `outputs/`.
@@ -112,7 +112,7 @@ PCX and VPN routes use separate destination networks.
 | Path | PRD side | DEV side | TUI packet test |
 | --- | --- | --- | --- |
 | VPC Peering | `10.250.0.0/16` | `10.230.0.0/16` | PRD management node to DEV Nginx, Tomcat, and MariaDB |
-| Site-to-Site VPN | `10.250.2.0/24` | `172.31.240.0/24` | Bidirectional ICMP between the PRD management node and DEV VPN test node |
+| Site-to-Site VPN | `10.250.2.0/24` | `10.231.240.0/24` | Bidirectional ICMP between the PRD management node and DEV VPN test node |
 
 The VPN connects a Virtual Private Gateway in Seoul to a StrongSwan EC2 customer gateway in Northern Virginia.
 

@@ -15,7 +15,7 @@ readonly VPC_NAME="KWU-PRD-VPC"
 readonly VPC_CIDR="10.250.0.0/16"
 readonly DEV_VPC_NAME="KWU-DEV-VPC"
 readonly DEV_VPC_CIDR="10.230.0.0/16"
-readonly VPN_TEST_CIDR="172.31.240.0/24"
+readonly VPN_TEST_CIDR="10.231.240.0/24"
 
 LOG_FILE=""
 ACCOUNT_ID=""

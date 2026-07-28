@@ -3,8 +3,8 @@ locals {
   dev_project_name = "kwu-dev-vpc"
   prd_vpc_cidr     = "10.250.0.0/16"
   dev_vpc_cidr     = "10.230.0.0/16"
-  vpn_test_cidr    = "172.31.240.0/24"
-  vpn_test_ip      = "172.31.240.10"
+  vpn_test_cidr    = "10.231.240.0/24"
+  vpn_test_ip      = "10.231.240.10"
   common_tags = {
     Project     = "aws-auto-infra"
     ManagedBy   = "Terraform"
@@ -203,6 +203,8 @@ module "dev_environment" {
   name_prefix           = local.dev_project_name
   vpc_cidr              = local.dev_vpc_cidr
   prd_cidr              = local.prd_vpc_cidr
+  vpn_test_cidr         = local.vpn_test_cidr
+  vpn_test_ip           = local.vpn_test_ip
   session_log_group_arn = module.dev_session_manager.log_group_arn
 }
 

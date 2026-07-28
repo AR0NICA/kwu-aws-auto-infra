@@ -1,6 +1,8 @@
 variable "name_prefix" { type = string }
 variable "vpc_cidr" { type = string }
 variable "prd_cidr" { type = string }
+variable "vpn_test_cidr" { type = string }
+variable "vpn_test_ip" { type = string }
 variable "session_log_group_arn" { type = string }
 
 terraform {
@@ -15,7 +17,6 @@ locals {
   public_subnet_cidr   = "10.230.1.0/24"
   tomcat_subnet_cidr   = "10.230.2.0/24"
   database_subnet_cidr = "10.230.3.0/24"
-  vpn_test_subnet_cidr = "172.31.240.0/24"
   availability_zone    = "us-east-1a"
 }
 
@@ -97,7 +98,7 @@ resource "aws_default_security_group" "this" {
 
 resource "aws_vpc_ipv4_cidr_block_association" "vpn_test" {
   vpc_id     = aws_vpc.this.id
-  cidr_block = local.vpn_test_subnet_cidr
+  cidr_block = var.vpn_test_cidr
 }
 
 resource "aws_internet_gateway" "this" {
@@ -129,7 +130,7 @@ resource "aws_subnet" "database" {
 
 resource "aws_subnet" "vpn_test" {
   vpc_id            = aws_vpc.this.id
-  cidr_block        = local.vpn_test_subnet_cidr
+  cidr_block        = var.vpn_test_cidr
   availability_zone = local.availability_zone
   tags              = { Name = "KWU-DEV-VPC-VPN-TEST-PRI-1A" }
 
@@ -412,7 +413,7 @@ resource "aws_instance" "vpn_test" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.vpn_test.id
-  private_ip                  = "172.31.240.10"
+  private_ip                  = var.vpn_test_ip
   vpc_security_group_ids      = [aws_security_group.vpn_test.id]
   associate_public_ip_address = false
   iam_instance_profile        = aws_iam_instance_profile.ssm_managed_node.name

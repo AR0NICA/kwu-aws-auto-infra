@@ -195,13 +195,13 @@ resource "aws_instance" "tomcat" {
   vpc_security_group_ids      = [var.tomcat_security_group_id]
   iam_instance_profile        = aws_iam_instance_profile.tomcat.name
   user_data_replace_on_change = true
-  user_data = templatefile("${path.module}/templates/tomcat-user-data.sh.tftpl", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/tomcat-user-data.sh.tftpl", {
     zone                = each.value.zone
     database_endpoint   = var.database_endpoint
     database_name       = var.database_name
     database_secret_arn = var.database_secret_arn
     aws_region          = var.aws_region
-  })
+  }))
 
   metadata_options {
     http_endpoint = "enabled"
